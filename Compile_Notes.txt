@@ -1,0 +1,22 @@
+conda activate aihwkit_py312
+cd Desktop/simulation/aihwkit
+export CUDA_HOME=/usr/local/cuda-12.8
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+rm -rf _skbuild build dist
+python setup.py build_ext -DRPU_PYTHON_EXECUTABLE=$(which python) -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=TRUE --inplace -DRPU_CUDA_ARCHITECTURES="75;120" -DUSE_CUDA=ON -DRPU_BLAS=OpenBLAS -j8 -DCUDA_USE_STATIC_CUDA_RUNTIME=OFF -DCMAKE_PREFIX_PATH=$CONDA_PREFIX
+pip install -e .
+
+
+conda activate aihwkit_py312
+cd Desktop/simulation/aihwkit
+export CUDA_HOME=/usr/local/cuda-12.8
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+export RPU_CUDA_ARCHITECTURES="75;86;89"
+export USE_CUDA=ON
+export NUM_BUILD_CORES=8 
+export CMAKE_BUILD_PARALLEL_LEVEL=8
+export NINJA_NUM_JOBS=8
+python -m build --no-isolation
+

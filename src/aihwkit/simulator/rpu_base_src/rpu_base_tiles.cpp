@@ -185,6 +185,7 @@ void declare_rpu_tiles(py::module &m, std::string type_name_add) {
       .def(
           "set_weights",
           [](Class &self, torch::Tensor &weights) {
+            py::print("DEBUG: rpu_base_tiles.cpp->set_weights called");
             // Validate the weights dimensions.
             if (weights.dim() != 2 || weights.size(0) != self.getDSize() ||
                 weights.size(1) != self.getXSize()) {
@@ -262,6 +263,7 @@ void declare_rpu_tiles(py::module &m, std::string type_name_add) {
       .def(
           "set_weights_uniform_random",
           [](Class &self, float min_value, float max_value) {
+            py::print("DEBUG: rpu_base_tiles.cpp->set_weights_uniform_random called");
             std::lock_guard<std::mutex> lock(self.mutex_);
             self.setWeightsUniformRandom(min_value, max_value);
           },

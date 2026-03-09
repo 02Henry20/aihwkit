@@ -21,6 +21,11 @@ option(RPU_USE_FASTMOD "Use fast mod" OFF)
 option(RPU_USE_FASTRAND "Use fastrand" OFF)
 option(RPU_USE_TORCH_BUFFERS "Use torch buffers for RPUCuda" ON)
 
+# set(CMAKE_BUILD_TYPE Debug)
+
+# set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
+# set(CMAKE_C_FLAGS_DEBUG "-O0 -g")
+# set(CMAKE_CUDA_FLAGS_DEBUG "-G -g")
 
 set(RPU_BLAS "OpenBLAS" CACHE STRING "BLAS backend of choice (OpenBLAS, MKL)")
 set(RPU_CUDA_ARCHITECTURES "75;80;89" CACHE STRING "Target CUDA architectures")
@@ -51,6 +56,7 @@ if(WIN32)
 else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-narrowing -Wno-strict-overflow")
   set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -ftree-vectorize")
+  # set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 endif()
 
 if (APPLE)

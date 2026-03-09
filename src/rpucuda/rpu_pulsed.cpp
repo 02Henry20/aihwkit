@@ -286,6 +286,7 @@ template <typename T> void RPUPulsed<T>::setWeightsUniformRandom(T min_value, T 
 }
 
 template <typename T> void RPUPulsed<T>::setWeights(const T *weightsptr) {
+  //py::print("DEBUG: rpu_pulsed.cpp->setWeights called");
   CHECK_RPU_DEVICE_INIT;
   RPUSimple<T>::setWeights(weightsptr);
   rpu_device_->onSetWeights(this->getWeightsPtr());
