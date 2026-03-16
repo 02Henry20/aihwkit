@@ -66,6 +66,7 @@ template <typename T>
 pwukpvec_t<T> ConstantStepRPUDeviceCuda<T>::getUpdateKernels(
     int m_batch, int nK32, int use_bo64, bool out_trans, const PulsedUpdateMetaParameter<T> &up) {
 
+  DEBUG_OUT_FUNC("");
   pwukpvec_t<T> v;
 
   if (getPar().dw_min_std > (T)0.33) { // 3 sigma

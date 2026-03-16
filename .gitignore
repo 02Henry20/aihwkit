@@ -164,3 +164,7 @@ cython_debug/
 \#*\#
 .\#*
 *~
+
+
+# Custom 
+*.so.6

@@ -313,7 +313,7 @@ template <typename T> void RPUCudaSimple<T>::getWeights(T *weightsptr) const {
 
 template <typename T> void RPUCudaSimple<T>::setWeights(const T *host_source) {
   // expects row order weights as source and sets the device weights
-  // py::print("DEBUG: rpucuda.cu->setWeights called");
+  DEBUG_OUT_FUNC("");
   RPUSimple<T>::setWeights(host_source);
   dev_weights_->assignTranspose(
       RPUSimple<T>::getWeightsPtr()[0], this->getDSize(), this->getXSize());

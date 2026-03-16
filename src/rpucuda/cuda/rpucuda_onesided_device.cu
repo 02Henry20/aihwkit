@@ -289,6 +289,8 @@ template <typename T> void OneSidedRPUDeviceCuda<T>::invert() {
 template <typename T>
 pwukpvec_t<T> OneSidedRPUDeviceCuda<T>::getUpdateKernels(
     int m_batch, int nK32, int use_bo64, bool out_trans, const PulsedUpdateMetaParameter<T> &up) {
+
+  DEBUG_OUT_FUNC("");
   if (this->rpucuda_device_vec_.size() != 2) {
     RPU_FATAL("Expect exactly two devices.");
   }
@@ -315,6 +317,7 @@ void OneSidedRPUDeviceCuda<T>::runUpdateKernel(
     const ChoppedWeightOutput<T> *cwo) {
   // calling kpars->run(..,this,..) directly should cause error
   // because difference derived from abstract device..
+  DEBUG_OUT_FUNC("");
   DEBUG_OUT("start run update kernel.");
   DEBUG_CALL(kpars->print(););
   if (one_sided != 0) {

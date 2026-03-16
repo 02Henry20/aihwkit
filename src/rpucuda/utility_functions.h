@@ -83,7 +83,9 @@ typedef half2 half2_t;
     ss << MSG;                                                                                     \
   }
 
-// #define RPU_DEBUG
+// #define RPU_DEBUG //REVERSE -> comment out
+// #define RPU_DEBUG_ALL //REVERSE -> comment out
+
 
 #define ENFORCE_NO_DELAYED_UPDATE                                                                  \
   if (this->isDelayedUpdate()) {                                                                   \
@@ -93,6 +95,8 @@ typedef half2 half2_t;
 #ifndef DEBUG_OUT
 #ifdef RPU_DEBUG
 #define DEBUG_OUT(x) std::cout << __FILENAME__ << ":" << __LINE__ << " : " << x << std::endl;
+#define DEBUG_OUT_FUNC(x) std::cout << "[DEBUG] " << __FILENAME__ << ":" << __func__ << " called " << x << std::endl;
+#define DEBUG_DETAIL(description,var)  std::cout << "[DEBUG] " << __FILENAME__ << ":" << __LINE__ << " : " << description << " : " << var << std::endl;
 #define DEBUG_CALL(x)                                                                              \
   {                                                                                                \
     x;                                                                                             \
@@ -100,6 +104,8 @@ typedef half2 half2_t;
 #else
 #define DEBUG_OUT(x)
 #define DEBUG_CALL(x)
+#define DEBUG_OUT_FUNC(x)
+#define DEBUG_DETAIL(x,y)
 #endif
 #endif
 

@@ -70,6 +70,7 @@ pwukpvec_t<T> PulsedWeightUpdater<T>::getValidUpdateKernels(
     int m_batch,
     const PulsedUpdateMetaParameter<T> &up) {
   pwukpvec_t<T> v;
+  DEBUG_OUT_FUNC("");
   for (int use_bo64 : {1, 0}) { // omit 2 (ie bo64 translation)
     for (int out_trans : {true, false}) {
 
@@ -115,7 +116,7 @@ void PulsedWeightUpdater<T>::executeUpdate(
     const int m_batch,
     const bool x_trans_in,
     const bool d_trans_in) {
-
+  DEBUG_OUT_FUNC("");
   T pc_lr = rpucuda_device->getPulseCountLearningRate(lr, m_batch, up);
   blm_->makeCounts(
       x_in, d_in, up, rpucuda_device->getWeightGranularity(), pc_lr, m_batch, x_trans_in,
@@ -126,7 +127,7 @@ void PulsedWeightUpdater<T>::executeUpdate(
     up_context_->recordWaitEvent(context_->getStream(), context_->getEvent());
     c = &*up_context_;
   }
-  // the original learninig rate needs to be passed
+  // the original learning rate needs to be passed
   rpucuda_device->runUpdateKernel(
       kpars, c, dev_weights, m_batch, &*blm_, up, lr, c->getRandomStates(kpars->getNStates()));
 }
@@ -145,11 +146,12 @@ void PulsedWeightUpdater<T>::tuneUpdate(
     const int m_batch,
     const bool x_trans_in,
     const bool d_trans_in) {
+  DEBUG_OUT_FUNC("");
   bool is_async_update = is_async_update_;
   is_async_update_ = false;
 
   CUDA_TIMING_INIT;
-  int nrepeats = 3;
+  int nrepeats = 1; // REVERSE -> 3 originally
 
   CudaArray<T> dev_tmp_weights(context_, x_size_ * d_size_);
 
@@ -164,7 +166,7 @@ void PulsedWeightUpdater<T>::tuneUpdate(
   T min_timing = std::numeric_limits<T>::max();
   int min_i = 0;
 
-  for (int k = 0; k < v.size(); k++) {
+  for (int k = 0; k < 1; k++) { // REVERSE -> k < v.size()
 
     CUDA_TIMING_START(context_);
 
@@ -284,6 +286,7 @@ void PulsedWeightUpdater<T>::doDirectUpdate(
     const bool d_trans,
     const T beta) {
 
+  DEBUG_OUT_FUNC("");
   T *fpx_buffer = context_->template getSharedBuffer<T>(RPU_BUFFER_IN, x_size_ * m_batch);
   T *fpd_buffer = context_->template getSharedBuffer<T>(RPU_BUFFER_OUT, d_size_ * m_batch);
 
@@ -307,6 +310,7 @@ template <typename T>
 bool PulsedWeightUpdater<T>::checkForFPUpdate(
     AbstractRPUDeviceCuda<T> *rpucuda_device_in, const PulsedUpdateMetaParameter<T> &up) {
 
+  DEBUG_OUT_FUNC("");
   if (rpucuda_device_in == nullptr) {
     return true;
   }
@@ -340,6 +344,7 @@ void PulsedWeightUpdater<T>::update(
     const bool x_trans,
     const bool d_trans) {
   // FP update if no device is given
+  DEBUG_OUT_FUNC("");
   if (rpucuda_device_in != nullptr && rpucuda_device_in->hasDirectUpdate()) {
     doDirectUpdate(x_in, d_in, rpucuda_device_in, dev_weights, lr, up, m_batch, x_trans, d_trans);
     return;

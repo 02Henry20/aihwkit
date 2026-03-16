@@ -312,6 +312,7 @@ void declare_rpu_tiles_cuda(py::module &m, std::string type_name_add, bool add_u
           [](Class &self, const torch::Tensor &x_input_, const torch::Tensor &d_input_,
              bool bias = false, bool x_trans = false, bool d_trans = false,
              bool non_blocking = false) {
+            DEBUG_OUT_FUNC("PYBIND Update");
             T_RPU lr = self.getLearningRate();
             if (lr == (T_RPU)0.0) {
               return;
@@ -485,6 +486,7 @@ void declare_rpu_tiles_cuda(py::module &m, std::string type_name_add, bool add_u
           "update_indexed",
           [](Class &self, const torch::Tensor &x_input_, const torch::Tensor &d_input_,
              bool non_blocking = false) {
+            DEBUG_OUT_FUNC("");
             auto x_input = x_input_.contiguous();
             auto d_input = d_input_.contiguous();
             CHECK_TORCH_CUDA_INPUT(x_input);

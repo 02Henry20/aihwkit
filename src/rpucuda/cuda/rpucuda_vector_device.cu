@@ -311,7 +311,7 @@ void VectorRPUDeviceCuda<T>::runUpdateKernel(
   DEBUG_CALL(kpars->print(););
   int m = rpucuda_device_vec_.size();
   const auto &par = getPar();
-
+  DEBUG_OUT_FUNC("");
   if (cwo) {
     // this is because the weight is assumed to be updated
     // directly. Additonaly ops (like reduceToWeights) would not be

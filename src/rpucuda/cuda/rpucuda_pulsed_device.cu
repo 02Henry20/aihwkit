@@ -481,6 +481,7 @@ void PulsedRPUDeviceCuda<T>::runUpdateKernel(
     uint32_t *d_counts_chunk,
     const ChoppedWeightOutput<T> *cwo) {
 
+  DEBUG_OUT_FUNC("");
   if (this->getPar().count_pulses) {
     PWUKernelParameterPulseCounter<T> pulse_counter(
         c, this->x_size_, this->d_size_, m_batch, kpars->getnK32(), kpars->getUseBo64(),
@@ -490,6 +491,7 @@ void PulsedRPUDeviceCuda<T>::runUpdateKernel(
         d_counts_chunk);
   }
 
+  DEBUG_DETAIL("kpars Type", typeid(kpars).name());
   kpars->run(
       c->getStream(), dev_weights, m_batch, blm, this, up, dev_states, one_sided, x_counts_chunk,
       d_counts_chunk, cwo);

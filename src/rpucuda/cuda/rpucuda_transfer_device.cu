@@ -398,6 +398,7 @@ void TransferRPUDeviceCuda<T>::runUpdateKernel(
     const ChoppedWeightOutput<T> *cwo) {
   // calling kpars->run(..,this,..) directly should cause error because  derived from abstract
   // device..
+  DEBUG_OUT_FUNC("");
   DEBUG_OUT("start run update kernel.");
   DEBUG_CALL(kpars->print(););
 

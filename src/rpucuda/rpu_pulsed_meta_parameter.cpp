@@ -176,6 +176,11 @@ void PulsedUpdateMetaParameter<T>::calculateBlAB(
       B = A;
     }
   }
+
+  DEBUG_DETAIL("A Value: ", A);
+  DEBUG_DETAIL("weight_granularity Value: ", weight_granularity);
+  DEBUG_DETAIL("BL Value: ", BL);
+  DEBUG_DETAIL("B Value: ", B);
 }
 
 template <typename T>

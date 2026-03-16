@@ -140,7 +140,7 @@ template <typename T> struct UpdateFunctorLinearStepAdd {
 template <typename T>
 pwukpvec_t<T> LinearStepRPUDeviceCuda<T>::getUpdateKernels(
     int m_batch, int nK32, int use_bo64, bool out_trans, const PulsedUpdateMetaParameter<T> &up) {
-
+  DEBUG_OUT_FUNC("");
   pwukpvec_t<T> v;
   const auto &par = getPar();
   if (par.ls_mult_noise) {

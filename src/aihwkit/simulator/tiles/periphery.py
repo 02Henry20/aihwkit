@@ -115,6 +115,8 @@ class TileWithPeriphery(BaseTile, SimulatorTileWrapper):
         apply_weight_scaling: bool = True,
         realistic: bool = False,
         weight_scaling_omega: Optional[float] = None,
+        reference_combined_weights:Optional[Tensor] = None, 
+        **kwargs
     ) -> None:
         """Set the tile weights (and biases).
 
@@ -152,7 +154,13 @@ class TileWithPeriphery(BaseTile, SimulatorTileWrapper):
                 the mapping field.
 
         """
-        self.reference_combined_weights = None
+        
+        # print("[DEBUG] periphery.py->set_weights called")
+        
+        # print(f"[DEBUG] Weights In: {weight}")
+
+        
+        self.reference_combined_weights = reference_combined_weights
 
         if bias is not None and self.digital_bias:
             if not isinstance(bias, Tensor):
@@ -168,8 +176,7 @@ class TileWithPeriphery(BaseTile, SimulatorTileWrapper):
         self.tile.set_weights(combined_weights)
 
         if realistic:
-            self.program_weights()
-
+            self.program_weights(**kwargs)
     @no_grad()
     def get_weights(
         self, apply_weight_scaling: bool = True, realistic: bool = False
@@ -232,7 +239,7 @@ class TileWithPeriphery(BaseTile, SimulatorTileWrapper):
         from_reference: bool = True,
         x_values: Optional[Tensor] = None,
         learning_rate: float = 0.1,
-        max_iter: int = 10000,
+        max_iter: int = 1, #REVERSE back to -> 10000
         tolerance: Optional[float] = 0.01,
         w_init: Union[float, Tensor] = 0.01,
     ) -> None:
@@ -260,15 +267,15 @@ class TileWithPeriphery(BaseTile, SimulatorTileWrapper):
                 normalized conductance units and should include the
                 bias row if existing.
         """
-
+        # print("[DEBUG] periphery.py->program_weights called")
         if not from_reference or self.reference_combined_weights is None:
             self.reference_combined_weights = self.tile.get_weights()
             target_weights = self.reference_combined_weights
 
         if x_values is None:
             x_values = eye(self.tile.get_x_size())
-            x_values = x_values.to(self.device)
-            target_values = x_values @ target_weights.to(self.device).T
+        x_values = x_values.to(self.device)
+        target_values = x_values @ target_weights.to(self.device).T
 
         target_max = target_values.abs().max().item()
         if isinstance(w_init, Tensor):
@@ -284,6 +291,11 @@ class TileWithPeriphery(BaseTile, SimulatorTileWrapper):
             error = y - target_values
             if tolerance is not None and (error.abs().mean().item() / target_max) < tolerance:
                 break
+            # print(f"[DEBUG] target_weights: {target_weights}")            
+            # print(f"[DEBUG] target_values: {target_values}")
+            # print(f"[DEBUG] y: {y}")
+            # print(f"[DEBUG] X Values: {x_values}")
+            # print(f"[DEBUG] D Values (Error): {error}")
             self.tile.update(x_values, error, False)  # type: ignore
 
         self.tile.set_learning_rate(lr_save)  # type: ignore

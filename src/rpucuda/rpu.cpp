@@ -1306,7 +1306,7 @@ template <typename T> void RPUSimple<T>::setWeightsUniformRandom(T min_value, T 
 }
 
 template <typename T> void RPUSimple<T>::setWeights(const T *weightsptr) {
-  //py::print("DEBUG: rpu.cpp->setWeights called");
+  DEBUG_OUT_FUNC("");
   T *w = this->getWeightsPtr()[0];
   if (weightsptr != w) {
     int size = this->d_size_ * this->x_size_;

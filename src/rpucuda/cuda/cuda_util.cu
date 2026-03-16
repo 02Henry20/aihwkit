@@ -1086,7 +1086,7 @@ template <typename T> CudaArray<T> &CudaArray<T>::operator=(CudaArray<T> &&other
 template <typename T> void CudaArray<T>::setConst(T set_value) {
 
   DEBUG_ALL_OUT(
-      "Set (hsize,P,W,H): " << size_ << ", " << pitch_ << ", " << this->getWidthBytes() << ", " /
+      "Set (hsize,P,W,H): " << size_ << ", " << pitch_ << ", " << this->getWidthBytes() << ", "
                             << height_);
   if (size_ > 0) {
     context_->enforceDeviceId();

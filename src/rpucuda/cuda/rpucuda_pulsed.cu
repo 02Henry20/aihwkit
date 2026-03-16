@@ -212,6 +212,7 @@ void RPUCudaPulsed<T>::populateParameter(
 
 template <typename T> void RPUCudaPulsed<T>::setLearningRate(T lr) {
 
+  DEBUG_OUT_FUNC("");
   if (lr != this->getLearningRate()) {
 
     RPUCudaSimple<T>::setLearningRate(lr);
@@ -517,7 +518,7 @@ void RPUCudaPulsed<T>::loadExtra(const RPU::state_t &extra, const std::string pr
 /*********************************************************************************/
 template <typename T> void RPUCudaPulsed<T>::setWeights(const T *host_source) {
 
-  //py::print("DEBUG: rpucuda_pulsed.cu->setWeights called");
+  DEBUG_OUT_FUNC("");
   CHECK_RPU_DEVICE_INIT;
   RPUSimple<T>::setWeights(host_source); // sets host
 

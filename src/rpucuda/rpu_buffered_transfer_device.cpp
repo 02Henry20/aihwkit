@@ -109,8 +109,11 @@ template <typename T>
 BufferedTransferRPUDevice<T> &
 BufferedTransferRPUDevice<T>::operator=(BufferedTransferRPUDevice<T> &&other) noexcept {
   TransferRPUDevice<T>::operator=(std::move(other));
+  #pragma GCC diagnostic push
+  #pragma GCC diagnostic ignored "-Wself-move"
   transfer_buffer_vec_ = std::move(transfer_buffer_vec_);
-
+  #pragma GCC diagnostic pop
+  
   return *this;
 }
 

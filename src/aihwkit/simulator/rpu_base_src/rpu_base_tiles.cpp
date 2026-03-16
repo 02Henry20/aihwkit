@@ -185,7 +185,7 @@ void declare_rpu_tiles(py::module &m, std::string type_name_add) {
       .def(
           "set_weights",
           [](Class &self, torch::Tensor &weights) {
-            py::print("DEBUG: rpu_base_tiles.cpp->set_weights called");
+            DEBUG_OUT_FUNC("");
             // Validate the weights dimensions.
             if (weights.dim() != 2 || weights.size(0) != self.getDSize() ||
                 weights.size(1) != self.getXSize()) {
@@ -263,7 +263,7 @@ void declare_rpu_tiles(py::module &m, std::string type_name_add) {
       .def(
           "set_weights_uniform_random",
           [](Class &self, float min_value, float max_value) {
-            py::print("DEBUG: rpu_base_tiles.cpp->set_weights_uniform_random called");
+            DEBUG_OUT_FUNC("");
             std::lock_guard<std::mutex> lock(self.mutex_);
             self.setWeightsUniformRandom(min_value, max_value);
           },
@@ -545,6 +545,7 @@ void declare_rpu_tiles(py::module &m, std::string type_name_add) {
           [](Class &self, const torch::Tensor &x_input_, const torch::Tensor &d_input_,
              bool bias = false, bool x_trans = false, bool d_trans = false,
              bool non_blocking = false) {
+            DEBUG_OUT_FUNC("");
             T_RPU lr = self.getLearningRate();
             if (lr == (T_RPU)0.0) {
               return;
@@ -694,6 +695,7 @@ void declare_rpu_tiles(py::module &m, std::string type_name_add) {
           "update_indexed",
           [](Class &self, const torch::Tensor &x_input_, const torch::Tensor &d_input_,
              bool non_blocking = false) {
+            DEBUG_OUT_FUNC("");
             auto x_input = x_input_.contiguous();
             auto d_input = d_input_.contiguous();
             CHECK_TORCH_INPUT(x_input);

@@ -346,7 +346,7 @@ DEFINE_PWU_KERNEL_BASE(
 /********************************************************************************
  * PWUKernelParameterBatchSharedFunctor
  *********************************************************************************/
-
+/* HERE!!!*/
 template <typename T, typename FunctorT, int gp_count>
 DEFINE_PWU_KERNEL_PARAMETER(
     BatchSharedFunctor,

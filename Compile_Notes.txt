@@ -1,22 +1,61 @@
+
+Local compile:
 conda activate aihwkit_py312
 cd Desktop/simulation/aihwkit
 export CUDA_HOME=/usr/local/cuda-12.8
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-rm -rf _skbuild build dist
+rm -rf _skbuild build dist *.egg-info
 python setup.py build_ext -DRPU_PYTHON_EXECUTABLE=$(which python) -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=TRUE --inplace -DRPU_CUDA_ARCHITECTURES="75;120" -DUSE_CUDA=ON -DRPU_BLAS=OpenBLAS -j8 -DCUDA_USE_STATIC_CUDA_RUNTIME=OFF -DCMAKE_PREFIX_PATH=$CONDA_PREFIX
-pip install -e .
+pip install --force-reinstall --no-deps -e .
 
 
+
+Compile to .whl:
 conda activate aihwkit_py312
 cd Desktop/simulation/aihwkit
+rm -rf _skbuild build dist *.egg-info
 export CUDA_HOME=/usr/local/cuda-12.8
 export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-export RPU_CUDA_ARCHITECTURES="75;86;89"
+export LD_LIBRARY_PATH=$CUDA_HOME/lib8:$LD_LIBRARY_PATH
+export RPU_CUDA_ARCHITECTURES="89;120"
 export USE_CUDA=ON
-export NUM_BUILD_CORES=8 
+export NUM_BUILD_CORES=8
 export CMAKE_BUILD_PARALLEL_LEVEL=8
 export NINJA_NUM_JOBS=8
 python -m build --no-isolation
 
+
+
+see GPU usage: 
+watch -n 0.5 nvidia-smi
+
+
+
+Required Installations:
+Python	                3.12.12	        /home/henry/miniconda3/envs/aihwkit_py312/bin/python	                                                        Main interpreter used for build
+Python Include	        3.12	        /home/henry/miniconda3/envs/aihwkit_py312/include/python3.12	                                                Needed for C/C++ extension compilation
+Python Library	        3.12	        /home/henry/miniconda3/envs/aihwkit_py312/lib/libpython3.12.so	                                                Linked when building extensions
+NumPy Include	        —	            /home/henry/miniconda3/envs/aihwkit_py312/lib/python3.12/site-packages/numpy/_core/include
+
+C Compiler (gcc)	    GNU 15.2.0	    /home/henry/miniconda3/envs/aihwkit_py312/bin/x86_64-conda-linux-gnu-cc	                                        C compilation
+C++ Compiler (g++)	    GNU 15.2.0	    /home/henry/miniconda3/envs/aihwkit_py312/bin/x86_64-conda-linux-gnu-c++                    	                C++ compilation
+CUDA Compiler (nvcc)	CUDA 12.8.93	/usr/local/cuda-12.8/bin/nvcc	                                                                                CUDA kernel compilation
+CUDA Host Compiler	    GNU 13.3.0	    System GCC	                                                                                                    Used by nvcc internally
+
+CMake	                                /home/henry/miniconda3/envs/aihwkit_py312/lib/python3.12/site-packages/cmake/data/bin/cmake	                    Installed via pip
+Ninja	                                /home/henry/miniconda3/envs/aihwkit_py312/bin/ninja	                                                            Build system generator
+AR	                                    /home/henry/miniconda3/envs/aihwkit_py312/bin/x86_64-conda-linux-gnu-ar	                                        Static library archiver
+RANLIB	                                /home/henry/miniconda3/envs/aihwkit_py312/bin/x86_64-conda-linux-gnu-ranlib	                                    Index generator for archives
+LD Linker	                            /home/henry/miniconda3/envs/aihwkit_py312/bin/x86_64-conda-linux-gnu-ld	                                        Linking stage
+STRIP	                                /home/henry/miniconda3/envs/aihwkit_py312/bin/x86_64-conda-linux-gnu-strip	                                    Remove debug symbols
+
+CUDA Toolkit	        12.8.93	        /usr/local/cuda-12.8	                                                                                        System-wide CUDA
+CUDA Include	        12.8	        /usr/local/cuda-12.8/targets/x86_64-linux/include	                                                            Header files
+NVCC	                12.8.93	        /usr/local/cuda-12.8/bin/nvcc	                                                                                CUDA compiler
+
+OpenBLAS	                            /home/henry/miniconda3/envs/aihwkit_py312/lib/libopenblas.so	                                                BLAS backend used by AIHWKIT
+OpenBLAS Includes	                    /home/henry/miniconda3/envs/aihwkit_py312/include	                                                            Header files
+PyBind11	                            /home/henry/miniconda3/envs/aihwkit_py312/lib/python3.12/site-packages/pybind11/include	                        Python ↔ C++ bindings
+PyTorch Headers	                        /home/henry/miniconda3/envs/aihwkit_py312/lib/python3.12/site-packages/torch/include	                        Torch C++ interface
+Torch C++ API	                        /home/henry/miniconda3/envs/aihwkit_py312/lib/python3.12/site-packages/torch/include/torch/csrc/api/include

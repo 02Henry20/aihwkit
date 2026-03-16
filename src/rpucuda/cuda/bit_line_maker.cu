@@ -1962,6 +1962,8 @@ void BitLineMaker<T>::makeCounts(
   // just a double-check. In principle input implicit_pulses could
   // be omitted. However, it is a safe-guard to make sure the kpars
   // settings are correct.
+
+  DEBUG_OUT_FUNC("");
   if (up.needsImplicitPulses() != implicit_pulses) {
     RPU_FATAL("mixed up implicit pulses settings");
   }
@@ -2165,6 +2167,43 @@ void BitLineMaker<T>::makeCounts(
       umh_->translateTransToBatchOrder64(
           dev_x_counts_bo64_->getData(), dev_d_counts_bo64_->getData(), dev_x_counts_->getData(),
           dev_d_counts_->getData(), m_batch, current_BL_, current_ublm_);
+    }
+
+    // int size_d = dev_d_counts_->getSize();
+    // std::vector<unsigned int> host_d(size_d);
+    // cudaMemcpy(
+    //     host_d.data(), dev_d_counts_->getData(), size_d * sizeof(unsigned int),
+    //     cudaMemcpyDeviceToHost);
+    // DEBUG_DETAIL("D Count", dev_d_counts_->getData())
+    // DEBUG_DETAIL("D Count Size", size_d)
+    // for (int i = 0; i < size_d; i++) {
+    //   std::cout << host_d[i] << " ";
+    // }
+    // std::cout << std::endl;
+
+    // int size_x = dev_x_counts_->getSize();
+    // std::vector<unsigned int> host_x(size_x);
+    // cudaMemcpy(
+    //     host_x.data(), dev_x_counts_->getData(), size_x * sizeof(unsigned int),
+    //     cudaMemcpyDeviceToHost);
+    // DEBUG_DETAIL("X Count", dev_x_counts_->getData())
+    // DEBUG_DETAIL("X Count Size", size_x)
+    // for (int i = 0; i < size_x; i++) {
+    //   std::cout << host_x[i] << " ";
+    // }
+    // std::cout << std::endl;
+
+
+    DEBUG_DETAIL("X Count Type", typeid(dev_x_counts_).name())
+    DEBUG_DETAIL("D Count Type", typeid(dev_d_counts_).name())
+    DEBUG_DETAIL("X Count Size", sizeof(dev_x_counts_->getSize()))
+    DEBUG_DETAIL("D Count Size", sizeof(dev_d_counts_->getSize()))
+
+    if (use_bo64 > 1) {
+      DEBUG_DETAIL("X Count BO64", dev_x_counts_bo64_->getData())
+      DEBUG_DETAIL("D COUNT BO64", dev_d_counts_bo64_->getData())
+      DEBUG_DETAIL("X Count BO64 Size", sizeof(dev_x_counts_bo64_))
+      DEBUG_DETAIL("D COUNT BO64 Size", sizeof(dev_d_counts_bo64_))
     }
 
     // TODO: check this debug code

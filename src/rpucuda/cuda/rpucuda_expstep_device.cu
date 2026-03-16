@@ -155,6 +155,7 @@ template <typename T>
 pwukpvec_t<T> ExpStepRPUDeviceCuda<T>::getUpdateKernels(
     int m_batch, int nK32, int use_bo64, bool out_trans, const PulsedUpdateMetaParameter<T> &up) {
 
+  DEBUG_OUT_FUNC("");
   pwukpvec_t<T> v;
   const auto &pars = getPar();
 

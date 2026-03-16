@@ -69,6 +69,9 @@ BUILD_PULSED_DEVICE_META_PARAMETER(
 
 template <typename T>
 struct SoftBoundsRPUDeviceMetaParameter : LinearStepRPUDeviceMetaParameter<T> {
+  #pragma GCC diagnostic push
+  #pragma GCC diagnostic ignored "-Wtemplate-id-cdtor"
+  
   SoftBoundsRPUDeviceMetaParameter<T>() {
     // ctor, to overwrite default values to softbounds
     this->ls_decrease_up = (T)1.0;   // meaning 0 update at bounds
@@ -81,6 +84,8 @@ struct SoftBoundsRPUDeviceMetaParameter : LinearStepRPUDeviceMetaParameter<T> {
 
     this->ls_mean_bound_reference = false; // need reference to actual bounds for soft bounds
   }
+
+  #pragma GCC diagnostic pop
   void checkSoftBounds() const {
     if (!(this->ls_decrease_up == (T)1.0 && this->ls_decrease_down == (T)1.0 &&
           this->ls_decrease_up_dtod == (T)0.0 && this->ls_decrease_down_dtod == (T)0.0 &&

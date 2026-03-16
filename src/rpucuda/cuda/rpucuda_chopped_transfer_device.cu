@@ -522,7 +522,7 @@ void ChoppedTransferRPUDeviceCuda<T>::transfer(
 template <typename T>
 pwukpvec_t<T> ChoppedTransferRPUDeviceCuda<T>::getUpdateKernels(
     int m_batch, int nK32, int use_bo64, bool out_trans, const PulsedUpdateMetaParameter<T> &up) {
-
+  DEBUG_OUT_FUNC("");
   pwukpvec_t<T> v;
 
   // Note: Every will remain FIXED for the remainder (even if
@@ -555,7 +555,7 @@ void ChoppedTransferRPUDeviceCuda<T>::runUpdateKernel(
     const ChoppedWeightOutput<T> *cwo) {
   // calling kpars->run(..,this,..) directly should cause error because  derived from abstract
   // device..
-
+  DEBUG_OUT_FUNC("");
   if (x_counts_chunk != nullptr || d_counts_chunk != nullptr) {
     RPU_FATAL("Chunking not allowed here.");
   }
