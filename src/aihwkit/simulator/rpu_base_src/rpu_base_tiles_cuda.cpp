@@ -308,7 +308,28 @@ void declare_rpu_tiles_cuda(py::module &m, std::string type_name_add, bool add_u
            )pbdoc")
 
       .def(
+          "get_K_out",
+          [](Class &self) {
+            if (!self.K_out_) {
+              throw std::runtime_error("K_out_ is null");
+            }
+            if (self.K_out_->empty()) {
+              throw std::runtime_error("K_out_ is empty");
+            }
+            return *(self.K_out_);
+          })
+      .def(
+          "reset_K_out",
+          [](Class &self) {
+            if (!self.K_out_) {
+              throw std::runtime_error("K_out_ is null");
+            }
+            self.K_out_->clear();
+          })
+
+      .def(
           "update",
+          // STAGE 1
           [](Class &self, const torch::Tensor &x_input_, const torch::Tensor &d_input_,
              bool bias = false, bool x_trans = false, bool d_trans = false,
              bool non_blocking = false) {
@@ -361,6 +382,7 @@ void declare_rpu_tiles_cuda(py::module &m, std::string type_name_add, bool add_u
             self.finishUpdateCalculations();
             std::lock_guard<std::mutex> lock(self.mutex_);
             self.setExternalStream(at::cuda::getCurrentCUDAStream());
+
             self.update(
                 reinterpret_cast<T_RPU *>(x_input.template data_ptr<T>()),
                 reinterpret_cast<T_RPU *>(d_input.template data_ptr<T>()), bias, m_batch, x_trans,

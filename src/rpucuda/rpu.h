@@ -14,6 +14,7 @@
 #include <cfenv>
 #include <iostream>
 #include <memory>
+#include <vector>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -202,6 +203,8 @@ public:
   RPUSimple<T> &operator=(const RPUSimple<T> &);
   RPUSimple(RPUSimple<T> &&) noexcept;
   RPUSimple<T> &operator=(RPUSimple<T> &&) noexcept;
+
+  std::vector<float>* K_out_;
 
   friend void swap(RPUSimple<T> &a, RPUSimple<T> &b) noexcept {
 

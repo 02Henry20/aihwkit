@@ -9,6 +9,7 @@
 #include "cuda_util.h"
 #include "rpu_pulsed_meta_parameter.h"
 #include "update_management_helper.h"
+#include <vector>
 
 namespace RPU {
 
@@ -32,6 +33,8 @@ template <typename T> class BitLineMaker {
 public:
   explicit BitLineMaker(CudaContextPtr c, int x_size, int d_size);
 
+  std::vector<float>* K_out_;
+  
   template <typename XInputIteratorT, typename DInputIteratorT>
   void makeCounts(
       XInputIteratorT x_in,

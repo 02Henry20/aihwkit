@@ -352,6 +352,7 @@ DEFINE_PWU_KERNEL_PARAMETER(
     BatchSharedFunctor,
     BatchSharedBase,
     /*run*/
+    // STAGE 5
     RPU_PWU_START_BATCH_SHARED_INIT;
     if (this->implicit_pulses) {
       RPU_SWITCH_TRANS_TEMPLATE_FUNCTOR(

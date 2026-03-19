@@ -27,6 +27,7 @@ template <typename T> void RPUCudaPulsed<T>::initialize() {
 
   int d_size = this->getDSize();
   int x_size = this->getXSize();
+  this->K_out_ = new std::vector<float>{};
 
   CudaContextPtr c = this->context_;
   size_ = d_size * x_size;
@@ -45,7 +46,7 @@ template <typename T> void RPUCudaPulsed<T>::initialize() {
   fb_pass_ = RPU::make_unique<ForwardBackwardPassIOManagedCuda<T>>(c, x_size, d_size);
 
   // update arrays
-  up_pwu_ = RPU::make_unique<PulsedWeightUpdater<T>>(c, x_size, d_size);
+  up_pwu_ = RPU::make_unique<PulsedWeightUpdater<T>>(c, x_size, d_size, this->K_out_);
 
   dev_up_x_vector_inc1_ = RPU::make_unique<CudaArray<T>>(c, x_size);
   dev_up_d_vector_inc1_ = RPU::make_unique<CudaArray<T>>(c, d_size);
@@ -786,7 +787,13 @@ template <typename T> void RPUCudaPulsed<T>::makeUpdateAsync() {
 
 template <typename T>
 void RPUCudaPulsed<T>::updateMatrix(
-    const T *X_input, const T *D_input, int m_batch, bool x_trans, bool d_trans) {
+    const T *X_input,
+    const T *D_input,
+    int m_batch,
+    bool x_trans,
+    bool d_trans) {
+  // STAGE 1.2
+  DEBUG_OUT_FUNC("")
   updateMatrixIterator(X_input, D_input, m_batch, x_trans, d_trans);
 }
 
@@ -854,7 +861,7 @@ void RPUCudaPulsed<T>::updateIndexedSlice(
 
 template <typename T>
 void RPUCudaPulsed<T>::updateVector(const T *x_input, const T *d_input, int x_inc, int d_inc) {
-
+  DEBUG_OUT_FUNC("")
   const T *x_input_inc1 = x_input;
   const T *d_input_inc1 = d_input;
 
@@ -877,7 +884,14 @@ void RPUCudaPulsed<T>::updateVector(const T *x_input, const T *d_input, int x_in
 template <typename T>
 template <typename XInputIteratorT, typename DInputIteratorT>
 void RPUCudaPulsed<T>::updateMatrixIterator(
-    XInputIteratorT X_input, DInputIteratorT D_input, int m_batch, bool x_trans, bool d_trans) {
+    XInputIteratorT X_input,
+    DInputIteratorT D_input,
+    int m_batch,
+    bool x_trans,
+    bool d_trans)
+    {
+  DEBUG_OUT_FUNC("")
+  // STAGE 1.3
   this->last_update_m_batch_ = m_batch;
 
   const auto &up = getMetaPar().up;
@@ -899,6 +913,7 @@ void RPUCudaPulsed<T>::updateMatrixIterator(
     }
     T lr = this->getAlphaLearningRate();
     T *weights = this->getUpWeightsCuda();
+
     up_pwu_->update(
         X_input, D_input, weights, &*rpucuda_device_, up, lr, m_batch, x_trans, d_trans);
 

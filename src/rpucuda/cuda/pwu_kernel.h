@@ -283,6 +283,7 @@ template <typename T> struct UpdateFunctorConstantStep {
       T noise_std_dw,
       curandState &local_state) {
 
+    // STAGE 7
     // note that only w and par_1 will be written back when used. Thus it can be a "hidden_weights"
     // type note that we here assume that stoch_value is < 1, or if larger, then it did not hit the
     // bound.
@@ -317,6 +318,13 @@ template <typename T> struct UpdateFunctorConstantStep {
     // better always check both bounds
     w = (w > wmax) ? wmax : w;
     w = (w < wmin) ? wmin : w;
+    // printf("negative: %d\n", negative);
+    // printf("dw: %f\n", dw);
+    // printf("n: %d\n", n);
+    // printf("sigma: %f\n", sigma);
+    // printf("wmin: %f\n", wmin);   
+    // printf("wmax: %f\n", wmax);
+    // printf("w: %f\n", w);
   }
 };
 
@@ -1049,6 +1057,9 @@ __global__ void kernelUpdateWBatchSharedFunctor(
   // -- batch is strided. (need batch_stride * sizeof(int) * nK32 * (32 + blockDim.x/32) memory )
   // -- shared memory is used to save x and d values
   // -- nthreads needs to be divisible by 32 (D_BLOCK_SIZE)!!
+
+  
+  // STAGE 6
 
   extern __shared__ __align__(sizeof(uint64_t)) uint32_t shared_d_and_x_counts_32[];
   count_t *shared_d_and_x_counts = reinterpret_cast<count_t *>(shared_d_and_x_counts_32);

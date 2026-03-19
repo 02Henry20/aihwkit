@@ -432,6 +432,10 @@ __global__ void kernelUMGetScaleAndKValues(
   T lr = fabs(lr_in);
   int Kmax = Kmax_in;
 
+  // STAGE 3 K and Scale Values
+  
+
+  
   if (tid < m_batch) {
     T x_val = x_amax_values[tid];
     T d_val = d_amax_values[tid] * um_grad_scale;
@@ -446,6 +450,7 @@ __global__ void kernelUMGetScaleAndKValues(
       if (ublm) {
         int K = ceil(k_val);
         K_values[tid] = (K <= Kmax) ? K : Kmax;
+        // printf("K_values: %d\n", (K <= Kmax) ? K : Kmax);
       }
     } else {
       // dummy: lr, x, or d is all zero
@@ -454,8 +459,19 @@ __global__ void kernelUMGetScaleAndKValues(
         K_values[tid] = 1;
       }
     }
+
+    // printf("x_val: %f\n", x_val);
+    // printf("d_val: %f\n", d_val);
+    // printf("um_grad_scale: %f\n", um_grad_scale);
+    // printf("lr: %f\n", lr);
+    // printf("weight_granularity: %f\n", weight_granularity);
+    // printf("Kmax: %d\n", Kmax);
+    // printf("k_val: %f\n", k_val);
+    // printf("tid: %d\n", tid);
+    // printf("scale_values: %f\n", sqrt(x_val / d_val));
+
+    }
     // note:  K values are not set in case of ~ublm
-  }
 }
 
 template <int thread_block_size>

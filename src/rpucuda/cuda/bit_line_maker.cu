@@ -18,6 +18,8 @@
 #include "cuda_math_util.h"
 #include "cuda_util.h"
 #include "io_iterator.h"
+#include <thrust/device_ptr.h>
+#include <thrust/host_vector.h>
 
 namespace RPU {
 
@@ -526,6 +528,7 @@ template int debugKernelUpdateGetCounts_Linear<half_t, 32>(
 
 #define GET_COUNTS_LOOP(PROB, SIZE, COUNTS, SCALEPROB)                                             \
   sz = SIZE;                                                                                       \
+  /* STAGE 3.3 */                                                                                   \
   if (sourceId < sz) {                                                                             \
     value = PROB[sourceId];                                                                        \
     c = &COUNTS[sourceId];                                                                         \
@@ -968,6 +971,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
 #define GET_COUNTS_SIMPLE_LOOP_BATCH(                                                              \
     PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SPROPOP, TIDSTART, TIDEND, TIDN)               \
   {                                                                                                \
+      /*STAGE 3.3 BATCH*/                                                                          \
     if ((tid >= TIDSTART) && (tid < TIDEND)) {                                                     \
       int sz = SIZE;                                                                               \
       int counts_offset = nK32 * sz;                                                               \
@@ -1052,6 +1056,8 @@ __global__ void kernelUpdateGetCountsBatch_SimpleLoop2(
   // -- CAUTION: some bit boundardy issue? Very seldom 64 version seems one bit off.. ignore. Has no
   // relevance with noise
   //             could be just a rounding issue
+
+  //STAGE 3.2 BATCH
 
   const int tid = blockDim.x * blockIdx.x + threadIdx.x; // can be larger that x_size or d_size
   const int x_size = x_size_in;
@@ -1167,7 +1173,7 @@ __global__ void kernelUpdateGetCounts_Loop2(
 
   // -- let each warp compute 32 K values
   // -- no limit for K , however BLocked design might be better for larger K
-
+  // STAGE 3.2
   volatile int tid = blockDim.x * blockIdx.x + threadIdx.x;
   const int x_size = x_size_in;
   const int d_size = d_size_in;
@@ -1963,6 +1969,7 @@ void BitLineMaker<T>::makeCounts(
   // be omitted. However, it is a safe-guard to make sure the kpars
   // settings are correct.
 
+  // STAGE 3.1
   DEBUG_OUT_FUNC("");
   if (up.needsImplicitPulses() != implicit_pulses) {
     RPU_FATAL("mixed up implicit pulses settings");
@@ -2025,10 +2032,36 @@ void BitLineMaker<T>::makeCounts(
       scale_values = umh_->getScaleValueData();
       K_values = umh_->getKValueData();
 
+      // K_values to K_out:
+      thrust::device_ptr<int> dev_ptr(K_values);
+      thrust::host_vector<int> host_vec(dev_ptr, dev_ptr + m_batch);
+      this->K_out_->insert(this->K_out_->end(), host_vec.begin(), host_vec.end());
+
       // always compute in this case (expected by CWO)
       umh_->computeKc(m_batch);
     }
   }
+
+
+  // if (K_values != nullptr) {
+  //   std::vector<int> host_K(m_batch);
+  //   cudaMemcpy(host_K.data(), K_values, m_batch * sizeof(int), cudaMemcpyDeviceToHost);
+  //   for (int i = 0; i < m_batch; i++) {
+  //     printf("K_values[%d] = %d\n", i, host_K[i]);
+  //   }
+  // } else {
+  //   printf("K_values is NULL\n");
+  // }
+
+  // if (scale_values != nullptr) {
+  //   std::vector<float> host_scale(m_batch);
+  //   cudaMemcpy(host_scale.data(), scale_values, m_batch * sizeof(int), cudaMemcpyDeviceToHost);
+  //   for (int i = 0; i < m_batch; i++) {
+  //     printf("scale_values[%d] = %f\n", i, host_scale[i]);
+  //   }
+  // } else {
+  //   printf("scale_values is NULL\n");
+  // }
 
   // ------- generate the requested bit lines
 
@@ -2205,6 +2238,16 @@ void BitLineMaker<T>::makeCounts(
       DEBUG_DETAIL("X Count BO64 Size", sizeof(dev_x_counts_bo64_))
       DEBUG_DETAIL("D COUNT BO64 Size", sizeof(dev_d_counts_bo64_))
     }
+
+    DEBUG_DETAIL("use_umh", use_umh)
+    DEBUG_DETAIL("Kplus1", Kplus1)
+    DEBUG_DETAIL("current_m_batch_", current_m_batch_)
+    DEBUG_DETAIL("current_out_trans_", current_out_trans_)
+    DEBUG_DETAIL("current_ublm_", current_ublm_)
+    DEBUG_DETAIL("current_lr_", current_lr_)
+    DEBUG_DETAIL("current_d_sparsity_", current_d_sparsity_)
+    DEBUG_DETAIL("current_BL_", current_BL_)
+
 
     // TODO: check this debug code
     // DEBUG_CALL(context_->synchronizeDevice(); CudaArray<T> dev_x(context_, x_size_);

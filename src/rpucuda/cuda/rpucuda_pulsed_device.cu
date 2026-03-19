@@ -480,7 +480,7 @@ void PulsedRPUDeviceCuda<T>::runUpdateKernel(
     uint32_t *x_counts_chunk,
     uint32_t *d_counts_chunk,
     const ChoppedWeightOutput<T> *cwo) {
-
+  // STAGE 4
   DEBUG_OUT_FUNC("");
   if (this->getPar().count_pulses) {
     PWUKernelParameterPulseCounter<T> pulse_counter(

@@ -556,6 +556,8 @@ void RPUSimple<T>::backward(
 template <typename T>
 void RPUSimple<T>::update(
     const T *X_input, const T *D_input, bool bias, int m_batch, bool x_trans, bool d_trans) {
+
+  // STAGE 1.1
   DEBUG_OUT("Update[" << x_trans << ", " << d_trans << "] (m_batch = " << m_batch << ")");
   last_update_m_batch_ = m_batch; // this is mini-batchsize * reuse_factor !
 
@@ -705,7 +707,6 @@ void RPUSimple<T>::backwardVector(const T *d_input, T *x_output, int d_inc, int 
 template <typename T>
 void RPUSimple<T>::updateVector(const T *x_input, const T *d_input, int x_inc, int d_inc) {
   DEBUG_OUT("RPU::updateVector. LR " << -this->getAlphaLearningRate());
-
   if (!this->getDeltaWeights()) {
     RPU::math::ger<T>(
         CblasRowMajor, this->d_size_, this->x_size_, -this->getAlphaLearningRate(), d_input, d_inc,

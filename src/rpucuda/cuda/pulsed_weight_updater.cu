@@ -17,6 +17,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <vector>
 
 namespace RPU {
 
@@ -25,11 +26,12 @@ namespace RPU {
 /******************************************************************************************************************/
 
 template <typename T>
-PulsedWeightUpdater<T>::PulsedWeightUpdater(CudaContextPtr c, int x_size, int d_size)
+PulsedWeightUpdater<T>::PulsedWeightUpdater(CudaContextPtr c, int x_size, int d_size, std::vector<float>* K_out_)
     : context_{c}, x_size_{x_size}, d_size_{d_size}
 
 {
   blm_ = RPU::make_unique<BitLineMaker<T>>(c, x_size, d_size);
+  blm_->K_out_ = K_out_;
 
   up_context_ = nullptr;
   is_async_update_ = false;
@@ -116,6 +118,7 @@ void PulsedWeightUpdater<T>::executeUpdate(
     const int m_batch,
     const bool x_trans_in,
     const bool d_trans_in) {
+  // STAGE 3
   DEBUG_OUT_FUNC("");
   T pc_lr = rpucuda_device->getPulseCountLearningRate(lr, m_batch, up);
   blm_->makeCounts(
@@ -151,7 +154,7 @@ void PulsedWeightUpdater<T>::tuneUpdate(
   is_async_update_ = false;
 
   CUDA_TIMING_INIT;
-  int nrepeats = 1; // REVERSE -> 3 originally
+  int nrepeats = 3; // REVERSE -> 3 originally
 
   CudaArray<T> dev_tmp_weights(context_, x_size_ * d_size_);
 
@@ -166,7 +169,7 @@ void PulsedWeightUpdater<T>::tuneUpdate(
   T min_timing = std::numeric_limits<T>::max();
   int min_i = 0;
 
-  for (int k = 0; k < 1; k++) { // REVERSE -> k < v.size()
+  for (int k = 0; k < v.size(); k++) { // REVERSE -> k < v.size()
 
     CUDA_TIMING_START(context_);
 
@@ -175,9 +178,13 @@ void PulsedWeightUpdater<T>::tuneUpdate(
           v[k], x_in, d_in, dev_tmp_weights.getData(), tmp_device, up_tuning, lr, m_batch,
           x_trans_in, d_trans_in);
     }
+
+    // reset K_out after tune
+    this->blm_->K_out_->clear();
+
     if (verbose_ > 1) {
-      CUDA_TIMING_STOP(context_, v[k]->getName());
-    } else {
+       CUDA_TIMING_STOP(context_, v[k]->getName()); 
+    }else {
       CUDA_TIMING_STOP_NO_OUTPUT(context_);
     }
     v[k]->timing = milliseconds / nrepeats;
@@ -343,6 +350,7 @@ void PulsedWeightUpdater<T>::update(
     const int m_batch,
     const bool x_trans,
     const bool d_trans) {
+  // STAGE 2
   // FP update if no device is given
   DEBUG_OUT_FUNC("");
   if (rpucuda_device_in != nullptr && rpucuda_device_in->hasDirectUpdate()) {
