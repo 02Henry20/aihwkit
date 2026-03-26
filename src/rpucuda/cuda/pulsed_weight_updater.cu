@@ -17,7 +17,7 @@
 #include <limits>
 #include <memory>
 #include <random>
-#include <vector>
+#include <thrust/device_vector.h>
 
 namespace RPU {
 
@@ -26,7 +26,7 @@ namespace RPU {
 /******************************************************************************************************************/
 
 template <typename T>
-PulsedWeightUpdater<T>::PulsedWeightUpdater(CudaContextPtr c, int x_size, int d_size, std::vector<float>* K_out_)
+PulsedWeightUpdater<T>::PulsedWeightUpdater(CudaContextPtr c, int x_size, int d_size, thrust::device_vector<float> *K_out_)
     : context_{c}, x_size_{x_size}, d_size_{d_size}
 
 {

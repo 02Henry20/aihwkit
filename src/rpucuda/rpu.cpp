@@ -16,6 +16,7 @@
 #include <iostream>
 #include <memory>
 #include <random>
+#include <thrust/device_vector.h>
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -222,6 +223,8 @@ template <typename T> void RPUSimple<T>::initialize(int x_sz, int d_sz) {
   this->x_size_ = x_sz;
   this->d_size_ = d_sz;
 
+  this->K_out_ = new thrust::device_vector<float>();
+  
   use_delayed_update_ = false;
 
   weights_ = Array_2D_Get<T>(d_sz, x_sz);
@@ -1535,6 +1538,13 @@ template <typename T> void RPUSimple<T>::printWeights(int x_count, int d_count) 
     }
     std::cout << std::endl;
   }
+}
+
+template <typename T> void RPUSimple<T>::resetKout() {
+  if (this->K_out_) {
+    delete this->K_out_;
+    this->K_out_ = new thrust::device_vector<float>();
+  } 
 }
 
 template <typename T> void RPUSimple<T>::printToStream(std::stringstream &ss) const {

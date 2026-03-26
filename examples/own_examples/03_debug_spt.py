@@ -14,23 +14,61 @@ if device.type == "cuda":
 else:
     print("Running on CPU!")
 
-x = torch.Tensor([[0.1, 0.2, 0.4, 0.3], [0.2, 0.1, 0.1, 0.3]])
-y = torch.Tensor([[1.0, 0.5], [0.7, 0.3]])
+def initialize_same_weight(model):
+    weight = torch.tensor([
+        [0.0]
+    ])
+    
+    model.set_weights(weight=weight.clone(), realistic = False)
+    if not torch.equal(model.get_weights(realistic = False)[0], weight):
+        return False
+    else:
+        return True    
 
-rpu_config = IdealizedPreset()
-rpu_config.update.desired_bl = 100
-rpu_config.update.pulse_type = PulseType.STOCHASTIC_COMPRESSED
-rpu_config.update.update_bl_management = False
-rpu_config.update.update_management = False
-model = AnalogLinear(4, 2, bias=False, rpu_config=rpu_config)
+            
+def create_stochastic_model(desired_bl):
+    rpu_config = IdealizedPreset()
 
-if cuda.is_compiled():
-    x = x.cuda()
-    y = y.cuda()
-    model = model.cuda()
+    rpu_config.update.desired_bl = desired_bl
+    rpu_config.update.pulse_type = PulseType.STOCHASTIC_COMPRESSED
+    rpu_config.update.update_bl_management = False
+    rpu_config.update.update_management = False
+    rpu_config.update.fixed_bl = True
+    rpu_config.device.dw_min_std = 0
+    rpu_config.device.dw_min_dtod = 0
+    rpu_config.device.w_max_dtod = 0
+    rpu_config.device.w_min_dtod = 0
+    rpu_config.forward.is_perfect = True
+    model = AnalogLinear(1, 1, bias=False, rpu_config=rpu_config)
 
+    return model
 
-torch.manual_seed(100)
-weight = torch.randn(2, 4)
+def move_model_to_device(model):
+    if cuda.is_compiled():
+      return model.cuda()
+    else:
+      print("Cuda not Compiled")
+      return model
+    
+# 1183 is max    
+bl = 100
+model = create_stochastic_model(bl)
+model = move_model_to_device(model)
+initialize_same_weight(model)
+x_ref = torch.tensor([1.0])
+
+weight_init = model.get_weights(realistic=False)[0]
+
+weight_tar = torch.tensor([0.1])
 print("\n\n")
-model.set_weights(weight=weight.clone(), realistic = True)
+
+
+model.set_weights(weight=weight_tar, bias=None, realistic = True, apply_weight_scaling =False,w_init=weight_init.clone(), learning_rate = 0.1, x_values = x_ref)
+weight_after = model.get_weights(realistic=False)[0]
+
+weight_error = (weight_after-weight_tar)/weight_tar
+
+print(f"weight_init: {weight_init}\n")
+print(f"weight_tar: {weight_tar}")
+print(f"weight_after: {weight_after}\n")
+print(f"weight_error {weight_error}")

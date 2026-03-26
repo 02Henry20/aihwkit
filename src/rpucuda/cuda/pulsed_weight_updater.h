@@ -10,13 +10,15 @@
 #include "cuda_util.h"
 #include "rpu_pulsed_meta_parameter.h"
 #include "rpucuda_pulsed_device.h"
-#include <vector>
+#include <thrust/device_vector.h>
+#include <memory>
+
 namespace RPU {
 
 template <typename T> class PulsedWeightUpdater {
 
 public:
-  explicit PulsedWeightUpdater(CudaContextPtr c, int x_size, int d_size, std::vector<float>* K_out_ =  nullptr);
+  explicit PulsedWeightUpdater(CudaContextPtr c, int x_size, int d_size, thrust::device_vector<float> *K_out_ =  nullptr);
 
   template <typename XInputIteratorT, typename DInputIteratorT>
   void update(

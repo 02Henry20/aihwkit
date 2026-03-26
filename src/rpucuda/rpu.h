@@ -19,6 +19,7 @@
 #include <random>
 #include <sstream>
 #include <unordered_map>
+#include <thrust/device_vector.h>
 
 // #pragma STDC FENV_ACCESS ON
 
@@ -204,7 +205,7 @@ public:
   RPUSimple(RPUSimple<T> &&) noexcept;
   RPUSimple<T> &operator=(RPUSimple<T> &&) noexcept;
 
-  std::vector<float>* K_out_;
+  thrust::device_vector<float> *K_out_;
 
   friend void swap(RPUSimple<T> &a, RPUSimple<T> &b) noexcept {
 
@@ -261,6 +262,7 @@ public:
   };
   virtual void printParametersToStream(std::stringstream &ss) const;
 
+  void resetKout();
   void setLearningRate(T lrate) override;
 
   void printToStream(std::stringstream &ss) const override;

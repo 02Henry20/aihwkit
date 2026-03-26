@@ -13,6 +13,9 @@
 #include "rpucuda.h"
 #include "rpucuda_pulsed.h"
 #include <ATen/cuda/CUDAContext.h>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <vector>
 
 #define CHECK_CUDA(x)                                                                              \
   TORCH_CHECK(                                                                                     \
@@ -298,7 +301,7 @@ void declare_rpu_tiles_cuda(py::module &m, std::string type_name_add, bool add_u
 
            Args:
                d_input: ``[N, *,  d_size]`` input :math:`\mathbf{d}` torch::Tensor.
-               bias: whether to use bias.
+               bias: whether to use bias.setLearningRate
                d_trans: whether the ``d_input`` matrix is transposed. That is of size ``[d_size, *, N]``
                x_trans: whether the ``x`` output matrix is transposed.
                non_blocking: whether to not sync the cuda execution
@@ -313,19 +316,18 @@ void declare_rpu_tiles_cuda(py::module &m, std::string type_name_add, bool add_u
             if (!self.K_out_) {
               throw std::runtime_error("K_out_ is null");
             }
-            if (self.K_out_->empty()) {
-              throw std::runtime_error("K_out_ is empty");
-            }
-            return *(self.K_out_);
+
+            thrust::host_vector<float> host_vec = *(self.K_out_);
+            return std::vector<float>(host_vec.begin(), host_vec.end());
           })
       .def(
           "reset_K_out",
           [](Class &self) {
-            if (!self.K_out_) {
-              throw std::runtime_error("K_out_ is null");
+            if (self.K_out_) {
+              self.resetKout();
             }
-            self.K_out_->clear();
-          })
+          }
+          )
 
       .def(
           "update",
