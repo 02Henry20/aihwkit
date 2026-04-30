@@ -205,7 +205,8 @@ public:
   RPUSimple(RPUSimple<T> &&) noexcept;
   RPUSimple<T> &operator=(RPUSimple<T> &&) noexcept;
 
-  thrust::device_vector<float> *K_out_;
+  thrust::device_vector<int>* K_out_;
+  int k_scheduler_ = 1;
 
   friend void swap(RPUSimple<T> &a, RPUSimple<T> &b) noexcept {
 

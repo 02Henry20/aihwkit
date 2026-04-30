@@ -26,7 +26,7 @@ namespace RPU {
 /******************************************************************************************************************/
 
 template <typename T>
-PulsedWeightUpdater<T>::PulsedWeightUpdater(CudaContextPtr c, int x_size, int d_size, thrust::device_vector<float> *K_out_)
+PulsedWeightUpdater<T>::PulsedWeightUpdater(CudaContextPtr c, int x_size, int d_size, thrust::device_vector<int> *K_out_)
     : context_{c}, x_size_{x_size}, d_size_{d_size}
 
 {
@@ -121,6 +121,7 @@ void PulsedWeightUpdater<T>::executeUpdate(
   // STAGE 3
   DEBUG_OUT_FUNC("");
   T pc_lr = rpucuda_device->getPulseCountLearningRate(lr, m_batch, up);
+  blm_->k_scheduler_ = k_scheduler_;
   blm_->makeCounts(
       x_in, d_in, up, rpucuda_device->getWeightGranularity(), pc_lr, m_batch, x_trans_in,
       d_trans_in, kpars->getOutTrans(), kpars->getUseBo64(), kpars->getImplicitPulses());
@@ -179,8 +180,6 @@ void PulsedWeightUpdater<T>::tuneUpdate(
           x_trans_in, d_trans_in);
     }
 
-    // reset K_out after tune
-    this->blm_->K_out_->clear();
 
     if (verbose_ > 1) {
        CUDA_TIMING_STOP(context_, v[k]->getName()); 

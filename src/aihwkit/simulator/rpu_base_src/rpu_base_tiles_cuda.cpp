@@ -317,17 +317,10 @@ void declare_rpu_tiles_cuda(py::module &m, std::string type_name_add, bool add_u
               throw std::runtime_error("K_out_ is null");
             }
 
-            thrust::host_vector<float> host_vec = *(self.K_out_);
-            return std::vector<float>(host_vec.begin(), host_vec.end());
+            thrust::host_vector<int> host_vec = *(self.K_out_);
+            return std::vector<int>(host_vec.begin(), host_vec.end());
           })
-      .def(
-          "reset_K_out",
-          [](Class &self) {
-            if (self.K_out_) {
-              self.resetKout();
-            }
-          }
-          )
+
 
       .def(
           "update",
@@ -566,7 +559,8 @@ void declare_rpu_tiles_cuda(py::module &m, std::string type_name_add, bool add_u
       .def(
           "__deepcopy__", [](const ClassPulsed &self, py::dict) { return ClassPulsed(self); },
           py::arg("memo"))
-      .def("get_meta_parameters", &ClassPulsed::getMetaPar);
+      .def("get_meta_parameters", &ClassPulsed::getMetaPar)
+      .def("set_k_scheduler", &ClassPulsed::setKScheduler, py::arg("k_scheduler"));
 };
 #undef NAME
 

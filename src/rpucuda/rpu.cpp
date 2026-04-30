@@ -222,8 +222,6 @@ template <typename T> void RPUSimple<T>::initialize(int x_sz, int d_sz) {
 
   this->x_size_ = x_sz;
   this->d_size_ = d_sz;
-
-  this->K_out_ = new thrust::device_vector<float>();
   
   use_delayed_update_ = false;
 
@@ -559,11 +557,9 @@ void RPUSimple<T>::backward(
 template <typename T>
 void RPUSimple<T>::update(
     const T *X_input, const T *D_input, bool bias, int m_batch, bool x_trans, bool d_trans) {
-
   // STAGE 1.1
   DEBUG_OUT("Update[" << x_trans << ", " << d_trans << "] (m_batch = " << m_batch << ")");
   last_update_m_batch_ = m_batch; // this is mini-batchsize * reuse_factor !
-
   // update weights
   if ((m_batch == 1) && (!x_trans) && (!d_trans)) {
     // short-cut for vectors
@@ -1540,12 +1536,7 @@ template <typename T> void RPUSimple<T>::printWeights(int x_count, int d_count) 
   }
 }
 
-template <typename T> void RPUSimple<T>::resetKout() {
-  if (this->K_out_) {
-    delete this->K_out_;
-    this->K_out_ = new thrust::device_vector<float>();
-  } 
-}
+
 
 template <typename T> void RPUSimple<T>::printToStream(std::stringstream &ss) const {
   ss << "RPUSimple<" << this->getDataTypeName() << ">(" << this->d_size_ << "," << this->x_size_

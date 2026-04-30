@@ -28,6 +28,7 @@ template <typename T> void RPUCudaPulsed<T>::initialize() {
   int d_size = this->getDSize();
   int x_size = this->getXSize();
 
+  this->K_out_ = new thrust::device_vector<int>();
   CudaContextPtr c = this->context_;
   size_ = d_size * x_size;
 
@@ -174,6 +175,10 @@ template <typename T> RPUCudaPulsed<T> &RPUCudaPulsed<T>::operator=(RPUCudaPulse
   return *this;
 }
 
+template <typename T>
+void RPUCudaPulsed<T>::setKScheduler(int k_scheduler) {
+  this->k_scheduler_ = k_scheduler;
+}
 
   template <typename T>
   void RPUCudaPulsed<T>::populateParameter(
@@ -775,9 +780,10 @@ template <typename T> RPUCudaPulsed<T> &RPUCudaPulsed<T>::operator=(RPUCudaPulse
   void RPUCudaPulsed<T>::updateMatrix(
       const T *X_input, const T *D_input, int m_batch, bool x_trans, bool d_trans) {
     // STAGE 1.2
+    this->K_out_->resize(m_batch);
     DEBUG_OUT_FUNC("")
     updateMatrixIterator(X_input, D_input, m_batch, x_trans, d_trans);
-  }
+  } 
 
   template <typename T>
   void RPUCudaPulsed<T>::updateIndexed(
@@ -840,7 +846,7 @@ template <typename T> RPUCudaPulsed<T> &RPUCudaPulsed<T>::operator=(RPUCudaPulse
     DEBUG_OUT_FUNC("")
     const T *x_input_inc1 = x_input;
     const T *d_input_inc1 = d_input;
-
+    this->K_out_->resize(1);
     if (x_inc !=
         1) { // could make iterators here. But never hit anyway (because matrix is used for inc>1)
       RPU::math::copy<T>(
@@ -867,13 +873,15 @@ template <typename T> RPUCudaPulsed<T> &RPUCudaPulsed<T>::operator=(RPUCudaPulse
 
     const auto &up = getMetaPar().up;
 
+    up_pwu_->k_scheduler_ = this->k_scheduler_;
+
     if (up_pwu_->checkForFPUpdate(&*rpucuda_device_, up)) {
       // we take a short-cut in case that FP update is requested:
       up_pwu_->doFPupdate(
           X_input, D_input, this->getUpWeightsCuda(), this->getAlphaLearningRate(), m_batch,
           x_trans, d_trans, this->getUpBeta());
-
-    } else {
+    }
+    else {
       T *local_dw = this->getDeltaWeights();
 
       if (local_dw) {

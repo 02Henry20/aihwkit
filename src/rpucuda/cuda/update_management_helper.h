@@ -16,6 +16,8 @@ template <typename T> class UpdateManagementHelper {
 public:
   explicit UpdateManagementHelper(CudaContextPtr c, int x_size, int d_size);
 
+  int k_scheduler_ = 1;
+
   template <typename XInputIteratorT, typename DInputIteratorT>
   void computeKandScaleValues(
       XInputIteratorT x_in,
@@ -56,6 +58,7 @@ public:
   }; // this is for no UBLM
 
   inline int *getKValueData() const { return dev_K_values_->getData(); };
+  inline int *getSubThreshData() const { return dev_SubThresh_values_->getData(); };
   inline kagg_t *getKcBlockData() const { return dev_Kc_block_->getData(); };
   inline kagg_t *getKcBlockAggregateData() const { return dev_Kc_block_aggregate_->getData(); };
   kagg_t getKnValue(bool ublm, int m_batch, int K) const;
@@ -86,6 +89,7 @@ private:
   std::unique_ptr<Maximizer<T>> d_maximizer_ = nullptr;
 
   std::unique_ptr<CudaArray<int>> dev_K_values_ = nullptr;
+  std::unique_ptr<CudaArray<int>> dev_SubThresh_values_ = nullptr;
   std::unique_ptr<CudaArray<T>> dev_scale_values_ = nullptr;
   std::unique_ptr<CudaArray<kagg_t>> dev_Kc_values_ = nullptr;
   std::unique_ptr<CudaArray<char>> dev_Kc_temp_storage_ = nullptr;

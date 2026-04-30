@@ -194,7 +194,9 @@ public:
     up_pwu_->getCountsDebug(x_counts, d_counts);
   };
 
-  virtual const PulsedMetaParameter<T> &getMetaPar() const { return par_; };
+
+  virtual const PulsedMetaParameter<T> &getMetaPar() const { return par_; }
+  void setKScheduler(int k_scheduler); 
 
   const AbstractRPUDeviceCuda<T> &getRPUDeviceCuda() { return *rpucuda_device_; };
 

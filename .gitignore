@@ -170,3 +170,4 @@ cython_debug/
 *.so.6
 /Notes
 /examples/own_examples
+/runs

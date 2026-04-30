@@ -417,6 +417,7 @@ template <typename T>
 __global__ void kernelUMGetScaleAndKValues(
     T *scale_values,
     int *K_values,
+    int *SubThresh_values,
     T *x_amax_values,
     T *d_amax_values,
     const int m_batch,
@@ -425,21 +426,21 @@ __global__ void kernelUMGetScaleAndKValues(
     const T lr_in,
     const int Kmax_in,
     const T um_reg_scale,
-    const T um_grad_scale) {
+    const T um_grad_scale,
+    int k_scheduler = 1) {
   int tid = blockDim.x * blockIdx.x + threadIdx.x;
   bool ublm = ublm_in;
   T weight_granularity = weight_granularity_in;
   T lr = fabs(lr_in);
   int Kmax = Kmax_in;
 
-  // STAGE 3 K and Scale Values
-  
-
-  
+  // STAGE 3 K and Scale Values 2
+    
   if (tid < m_batch) {
     T x_val = x_amax_values[tid];
     T d_val = d_amax_values[tid] * um_grad_scale;
-    T k_val = lr * x_val * d_val / weight_granularity;
+
+    T k_val = lr * x_val * d_val / (weight_granularity);
 
     if (k_val > (T)0.0) {
       if (k_val > (T)Kmax) {
@@ -449,8 +450,14 @@ __global__ void kernelUMGetScaleAndKValues(
 
       if (ublm) {
         int K = ceil(k_val);
-        K_values[tid] = (K <= Kmax) ? K : Kmax;
-        // printf("K_values: %d\n", (K <= Kmax) ? K : Kmax);
+
+        if (K <= 1) {
+          SubThresh_values[tid] = 1;
+          K_values[tid] = k_scheduler;
+        } else {
+          SubThresh_values[tid] = 0;
+          K_values[tid] = (K <= Kmax) ? K : Kmax;
+        }
       }
     } else {
       // dummy: lr, x, or d is all zero
@@ -520,6 +527,7 @@ template <typename T> void UpdateManagementHelper<T>::initializeBuffers(int m_ba
 
   buffer_m_batch_ = m_batch;
   dev_K_values_ = RPU::make_unique<CudaArray<int>>(context_, m_batch);
+  dev_SubThresh_values_ = RPU::make_unique<CudaArray<int>>(context_, m_batch);
   dev_Kc_values_ = RPU::make_unique<CudaArray<kagg_t>>(context_, m_batch + 1);
   dev_Kc_values_->setConst(0);
   dev_scale_values_ = RPU::make_unique<CudaArray<T>>(context_, m_batch);
@@ -723,6 +731,8 @@ void UpdateManagementHelper<T>::computeKandScaleValues(
     const int Kmax,
     const T um_reg_scale,
     const T um_grad_scale) {
+  
+  // STAGE 3 K and Scale Values 1
 
   if ((!update_management) && (!update_bl_management)) {
     return;
@@ -740,9 +750,9 @@ void UpdateManagementHelper<T>::computeKandScaleValues(
     // compute
     int nblocks = context_->getNBlocks(m_batch, nthreads_);
     kernelUMGetScaleAndKValues<<<nblocks, nthreads_, 0, context_->getStream()>>>(
-        dev_scale_values_->getData(), dev_K_values_->getData(), x_maximizer_->getMaxValues(),
-        d_maximizer_->getMaxValues(), m_batch, update_bl_management, weight_granularity, lr, Kmax,
-        um_reg_scale, um_grad_scale);
+        dev_scale_values_->getData(), dev_K_values_->getData(), dev_SubThresh_values_->getData(),
+        x_maximizer_->getMaxValues(), d_maximizer_->getMaxValues(), m_batch, update_bl_management,
+        weight_granularity, lr, Kmax, um_reg_scale, um_grad_scale, this->k_scheduler_);
   }
 }
 

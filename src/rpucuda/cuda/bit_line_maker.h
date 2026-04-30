@@ -32,8 +32,8 @@ template <typename T> class BitLineMaker {
 
 public:
   explicit BitLineMaker(CudaContextPtr c, int x_size, int d_size);
-
-  thrust::device_vector<float> *K_out_;
+  thrust::device_vector<int> *K_out_;
+  int k_scheduler_ = 1;
   
   template <typename XInputIteratorT, typename DInputIteratorT>
   void makeCounts(

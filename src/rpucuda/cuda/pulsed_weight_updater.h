@@ -18,7 +18,9 @@ namespace RPU {
 template <typename T> class PulsedWeightUpdater {
 
 public:
-  explicit PulsedWeightUpdater(CudaContextPtr c, int x_size, int d_size, thrust::device_vector<float> *K_out_ =  nullptr);
+  explicit PulsedWeightUpdater(CudaContextPtr c, int x_size, int d_size, thrust::device_vector<int> *K_out_ = nullptr);
+
+  int k_scheduler_ = 1;
 
   template <typename XInputIteratorT, typename DInputIteratorT>
   void update(
