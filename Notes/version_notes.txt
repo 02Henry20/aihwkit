@@ -1,0 +1,153 @@
+1.1.0 - base version no modifications but the extracting of k_values
+1.1.1 - proposal 1.2 flipping d_max in BL_dyn
+1.1.2 - proposal 1.2 only using d_max in denominator and nothing else
+1.1.3 - proposal 1.2 keep old Bl_dyn but put ln(d_max) into denominator -> shrinking with d without changing dimensions
+        T d_log = -log(fabs(d_val)) + 1;
+        if (d_log < (T)1) { 
+          d_log = (T)1; 
+        }
+        T k_val = lr * x_val * d_val * d_log / (weight_granularity);
+1.1.4  - proposal 1.2 flipping x_max*d_max in BL_dyn
+        T k_val = lr / (weight_granularity * x_val * d_val);
+1.1.5 - proposal 1.2 flipping d_max in BL_dyn and  put ln(d_max) into denominator -> shrinking with d without changing dimensions
+        T d_log = -log(fabs(d_val)) + 1;
+        if (d_log < (T)1) { 
+          d_log = (T)1; 
+        }
+        T k_val = lr * x_val * d_log / (weight_granularity * d_val );
+1.1.6 like 1.1.3 but with x and d in the log
+    T x_val = x_amax_values[tid];
+    T d_val = d_amax_values[tid] * um_grad_scale;
+    T xd_log = -log(fabs(x_val*d_val)) + 1;
+    if (xd_log < (T)1) {
+      xd_log = (T)1;
+    }
+    T k_val = lr * x_val * d_val * xd_log / (weight_granularity);
+1.1.7 like 1.1.3 but with x and d in the log and no +1
+    T x_val = x_amax_values[tid];
+    T d_val = d_amax_values[tid] * um_grad_scale;
+    T xd_log = -log(fabs(x_val*d_val));
+    if (xd_log < (T)1) {
+      xd_log = (T)1;
+    }
+    T k_val = lr * x_val * d_val * xd_log / (weight_granularity);
+1.1.8 - like 1.1.3 but no +1
+        T d_log = -log(fabs(d_val));
+        if (d_log < (T)1) { 
+          d_log = (T)1; 
+        }
+        T k_val = lr * x_val * d_val * d_log / (weight_granularity);
+
+
+1.2.0 added option to change desired_BL after model init (replaced in dynamic BL with bl_scheduler)
+1.2.1 extend option that bl_scheduler is added (or respectivey substracted) from dynamic BL
+1.2.2 - add const multiplier through "scheduler value"
+        T k_val = lr * x_val * d_val * k_scheduler/ (weight_granularity);
+1.2.3 - add threshold minimum - dyn_bl cant go below scheduler value
+        T x_val = x_amax_values[tid];
+            T d_val = d_amax_values[tid] * um_grad_scale;
+
+            T k_val = lr * x_val * d_val/ (weight_granularity);
+            
+            if (k_val > (T)0.0) {
+              if (k_val > (T)Kmax) {
+                d_val *= (T)Kmax / k_val;
+              }
+              scale_values[tid] = sqrt(x_val / d_val);
+
+              if (ublm) {
+                int K = ceil(k_val);
+                if(K<k_scheduler){
+                  K = k_scheduler;
+                }
+                K_values[tid] = (K <= Kmax) ? K : Kmax;
+                // printf("K_values: %d\n", (K <= Kmax) ? K : Kmax);
+
+                
+1.3.0 cover only subthreshold regime and increase BL through external Scheduler
+
+    int k_scheduler = 1) {
+  int tid = blockDim.x * blockIdx.x + threadIdx.x;
+  bool ublm = ublm_in;
+  T weight_granularity = weight_granularity_in;
+  T lr = fabs(lr_in);
+  int Kmax = Kmax_in;
+
+  // STAGE 3 K and Scale Values 2
+    
+  if (tid < m_batch) {
+    T x_val = x_amax_values[tid];
+    T d_val = d_amax_values[tid] * um_grad_scale;
+    T k_val = lr * x_val * d_val / weight_granularity;
+
+    if (k_val > (T)0.0) {
+      if (k_val > (T)Kmax) {
+        d_val *= (T)Kmax / k_val;
+      }
+      scale_values[tid] = sqrt(x_val / d_val);
+
+      if (ublm) {
+          int K = ceil(k_val);
+
+          if(K == 1){
+            K_values[tid] = k_scheduler;
+          } else {
+            K_values[tid] = (K <= Kmax) ? K : Kmax;
+          }
+           }
+
+1.3.1 same as 1.3.0 but add indication that one is in the subthreshold regime
+adjust logic in 
+  T *scale_values = nullptr;
+  int *K_values = nullptr;
+  auto begin_ptr = K_out_->begin();
+
+  if (use_umh) {
+    if (umh_ == nullptr) {
+      umh_ = RPU::make_unique<UpdateManagementHelper<T>>(context_, x_size_, d_size_);
+    }
+
+    if (um_if) {
+      umh_->k_scheduler_ = k_scheduler_;
+      umh_->computeKandScaleValues(
+          x_in, d_in, weight_granularity, lr, current_um_, current_ublm_, m_batch, x_trans, d_trans,
+          current_BL_, up.um_reg_scale, up.um_grad_scale);
+
+      scale_values = umh_->getScaleValueData();
+      K_values = umh_->getKValueData();
+
+      if (K_values != nullptr){
+        if (current_ublm_){
+          thrust::copy(K_values, K_values + m_batch, begin_ptr);
+        }
+
+        // make K_values positive for computeKc
+        thrust::transform(K_values, K_values + m_batch, K_values, [] __device__(int k) {
+          return (k < 0) ? -k : k;
+        });
+      }
+
+      // always compute in this case (expected by CWO)
+      umh_->computeKc(m_batch);
+
+    } 
+
+  }
+
+  if (!use_umh || !um_if || !current_ublm_ || (K_values == nullptr)) {
+    thrust::fill(begin_ptr, begin_ptr + m_batch, static_cast<int>(current_BL_));
+  }
+and the minus sign
+
+if (ublm) {
+  int K = ceil(k_val);
+
+  if (K == 1) {
+    K_values[tid] = -k_scheduler;
+  } else {
+    K_values[tid] = (K <= Kmax) ? K : Kmax;
+  }
+}
+
+
+1.4.0 like 1.1.0 but enables functionality to extract the actual pulse trains

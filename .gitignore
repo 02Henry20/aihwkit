@@ -168,6 +168,4 @@ cython_debug/
 
 # Custom 
 *.so.6
-/Notes
-/examples/own_examples
 /runs
