@@ -26,12 +26,26 @@ namespace RPU {
 /******************************************************************************************************************/
 
 template <typename T>
-PulsedWeightUpdater<T>::PulsedWeightUpdater(CudaContextPtr c, int x_size, int d_size, thrust::device_vector<int> *K_out_)
+PulsedWeightUpdater<T>::PulsedWeightUpdater(
+    CudaContextPtr c,
+    int x_size,
+    int d_size,
+    thrust::device_vector<int> *K_out,
+    thrust::device_vector<uint32_t> *x_train_out,
+    thrust::device_vector<uint32_t> *d_train_out,
+    int *out_trans_out,
+    int *x_size_out,
+    int *d_size_out)
     : context_{c}, x_size_{x_size}, d_size_{d_size}
 
 {
   blm_ = RPU::make_unique<BitLineMaker<T>>(c, x_size, d_size);
-  blm_->K_out_ = K_out_;
+  blm_->K_out_ = K_out;
+  blm_->x_train_out_ = x_train_out;
+  blm_->d_train_out_ = d_train_out;
+  blm_->out_trans_out_ = out_trans_out;
+  blm_->x_size_out_ = x_size_out;
+  blm_->d_size_out_ = d_size_out;
 
   up_context_ = nullptr;
   is_async_update_ = false;

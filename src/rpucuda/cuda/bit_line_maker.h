@@ -33,6 +33,12 @@ template <typename T> class BitLineMaker {
 public:
   explicit BitLineMaker(CudaContextPtr c, int x_size, int d_size);
   thrust::device_vector<int> *K_out_;
+  thrust::device_vector<uint32_t>* x_train_out_;
+  thrust::device_vector<uint32_t>* d_train_out_;
+
+  int* out_trans_out_;
+  int* x_size_out_;
+  int* d_size_out_;
   int k_scheduler_ = 1;
   
   template <typename XInputIteratorT, typename DInputIteratorT>

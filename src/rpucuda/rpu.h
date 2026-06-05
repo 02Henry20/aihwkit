@@ -206,6 +206,12 @@ public:
   RPUSimple<T> &operator=(RPUSimple<T> &&) noexcept;
 
   thrust::device_vector<int>* K_out_;
+  thrust::device_vector<uint32_t>* x_train_out_;
+  thrust::device_vector<uint32_t>* d_train_out_;
+
+  int* out_trans_out_;
+  int* x_size_out_;
+  int* d_size_out_;
   int k_scheduler_ = 1;
 
   friend void swap(RPUSimple<T> &a, RPUSimple<T> &b) noexcept {

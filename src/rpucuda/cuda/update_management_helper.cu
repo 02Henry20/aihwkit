@@ -451,13 +451,7 @@ __global__ void kernelUMGetScaleAndKValues(
       if (ublm) {
         int K = ceil(k_val);
 
-        if (K <= 1) {
-          SubThresh_values[tid] = 1;
-          K_values[tid] = k_scheduler;
-        } else {
-          SubThresh_values[tid] = 0;
-          K_values[tid] = (K <= Kmax) ? K : Kmax;
-        }
+        K_values[tid] = (K <= Kmax) ? K : Kmax;
       }
     } else {
       // dummy: lr, x, or d is all zero

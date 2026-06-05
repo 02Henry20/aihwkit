@@ -29,6 +29,12 @@ template <typename T> void RPUCudaPulsed<T>::initialize() {
   int x_size = this->getXSize();
 
   this->K_out_ = new thrust::device_vector<int>();
+  this->x_train_out_ = new thrust::device_vector<uint32_t>();
+  this->d_train_out_ = new thrust::device_vector<uint32_t>();
+
+  this->out_trans_out_ = new int(0);
+  this->x_size_out_ = new int(0);
+  this->d_size_out_ = new int(0);
   CudaContextPtr c = this->context_;
   size_ = d_size * x_size;
 
@@ -46,7 +52,16 @@ template <typename T> void RPUCudaPulsed<T>::initialize() {
   fb_pass_ = RPU::make_unique<ForwardBackwardPassIOManagedCuda<T>>(c, x_size, d_size);
 
   // update arrays
-  up_pwu_ = RPU::make_unique<PulsedWeightUpdater<T>>(c, x_size, d_size, this->K_out_);
+  up_pwu_ = RPU::make_unique<PulsedWeightUpdater<T>>(
+    c,
+    x_size,
+    d_size,
+    this->K_out_,
+    this->x_train_out_,
+    this->d_train_out_,
+    this->out_trans_out_,
+    this->x_size_out_,
+    this->d_size_out_);
 
   dev_up_x_vector_inc1_ = RPU::make_unique<CudaArray<T>>(c, x_size);
   dev_up_d_vector_inc1_ = RPU::make_unique<CudaArray<T>>(c, d_size);
@@ -103,6 +118,12 @@ RPUCudaPulsed<T>::RPUCudaPulsed(cudaStream_t s, RPUPulsed<T> &o)
 template <typename T> RPUCudaPulsed<T>::~RPUCudaPulsed() { 
   DEBUG_OUT("RPUCudaPulsed destroyed.");
   delete this->K_out_;
+  delete this->x_train_out_;
+  delete this->d_train_out_;
+
+  delete this->out_trans_out_;
+  delete this->x_size_out_;
+  delete this->d_size_out_;
 }
 
 // copy constructor

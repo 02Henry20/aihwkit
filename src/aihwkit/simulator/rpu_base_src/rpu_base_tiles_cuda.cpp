@@ -313,15 +313,70 @@ void declare_rpu_tiles_cuda(py::module &m, std::string type_name_add, bool add_u
       .def(
           "get_K_out",
           [](Class &self) {
-            if (!self.K_out_) {
+            if (!self.x_train_out_ ) {
               throw std::runtime_error("K_out_ is null");
             }
 
             thrust::host_vector<int> host_vec = *(self.K_out_);
             return std::vector<int>(host_vec.begin(), host_vec.end());
           })
+      .def(
+          "get_trains",
+          [](Class &self) {
+            if (!self.x_train_out_) {
+              throw std::runtime_error("x_train_out_ is null. makeCounts() was probably not called yet.");
+            }
 
+            if (!self.d_train_out_) {
+              throw std::runtime_error("d_train_out_ is null. makeCounts() was probably not called yet.");
+            }
 
+            if (!self.out_trans_out_) {
+              throw std::runtime_error("out_trans_out_ is null.");
+            }
+
+            if (!self.x_size_out_) {
+              throw std::runtime_error("x_size_out_ is null.");
+            }
+
+            if (!self.d_size_out_) {
+              throw std::runtime_error("d_size_out_ is null.");
+            }
+
+            if (self.x_train_out_->empty()) {
+              throw std::runtime_error("x_train_out_ is empty.");
+            }
+
+            if (self.d_train_out_->empty()) {
+              throw std::runtime_error("d_train_out_ is empty.");
+            }
+
+            if (*self.x_size_out_ <= 0) {
+              throw std::runtime_error("x_size_out_ is invalid.");
+            }
+
+            if (*self.d_size_out_ <= 0) {
+              throw std::runtime_error("d_size_out_ is invalid.");
+            }
+
+            thrust::host_vector<uint32_t> host_x = *(self.x_train_out_);
+            thrust::host_vector<uint32_t> host_d = *(self.d_train_out_);
+
+            py::dict result;
+
+            result["x_train"] =
+                std::vector<uint32_t>(host_x.begin(), host_x.end());
+
+            result["d_train"] =
+                std::vector<uint32_t>(host_d.begin(), host_d.end());
+
+            result["out_trans"] = *self.out_trans_out_;
+            result["x_size"] = *self.x_size_out_;
+            result["d_size"] = *self.d_size_out_;
+
+            return result;
+          }
+      )
       .def(
           "update",
           // STAGE 1

@@ -81,15 +81,93 @@ getIdxToLoad<false>(int batch_index, int count_index, int sz, int m_batch, int c
 }
 
 #define COMMA ,
+
+#define DEBUG_GETNFROMCOUNT32 0 // 1 = print debug, 0 = disable debug print
+
+__device__ __forceinline__ void dbg_append_char(char *buf, int &pos, int max_len, char c) {
+  if (pos < max_len - 1) {
+    buf[pos++] = c;
+    buf[pos] = '\0';
+  }
+}
+
+__device__ __forceinline__ void dbg_append_str(char *buf, int &pos, int max_len, const char *s) {
+  while (*s != '\0') {
+    dbg_append_char(buf, pos, max_len, *s);
+    s++;
+  }
+}
+
+__device__ __forceinline__ void dbg_append_uint(char *buf, int &pos, int max_len, uint32_t v) {
+  if (v == 0) {
+    dbg_append_char(buf, pos, max_len, '0');
+    return;
+  }
+
+  char tmp[10];
+  int len = 0;
+
+  while (v > 0 && len < 10) {
+    tmp[len++] = '0' + (v % 10);
+    v /= 10;
+  }
+
+  while (len > 0) {
+    dbg_append_char(buf, pos, max_len, tmp[--len]);
+  }
+}
+
 #define DEFINE_GETNFROMCOUNT32(ONE_SIDED, OS_ADD)                                                  \
   template <>                                                                                      \
   __device__ __forceinline__ void getNfromCount<ONE_SIDED COMMA uint32_t>(                         \
       uint32_t &n, uint32_t &negative, bool &mixed, uint32_t *x_ptr, uint32_t *d_ptr, int nK32,    \
       int shared_x_offset, int shared_d_offset, bool enforce_mixed) {                              \
+                                                                                                   \
+    char x_dbg[1024];                                                                              \
+    char d_dbg[1024];                                                                              \
+    char dbg[2048];                                                                                \
+    int x_pos = 0;                                                                                 \
+    int d_pos = 0;                                                                                 \
+    int dbg_pos = 0;                                                                               \
+                                                                                                   \
+    if (DEBUG_GETNFROMCOUNT32) {                                                                   \
+      x_dbg[0] = '\0';                                                                             \
+      d_dbg[0] = '\0';                                                                             \
+      dbg[0] = '\0';                                                                               \
+                                                                                                   \
+      dbg_append_str(dbg, dbg_pos, 2048, "block: ");                                               \
+      dbg_append_uint(dbg, dbg_pos, 2048, (uint32_t)blockIdx.x);                                   \
+      dbg_append_str(dbg, dbg_pos, 2048, ", thread: ");                                            \
+      dbg_append_uint(dbg, dbg_pos, 2048, (uint32_t)threadIdx.x);                                  \
+      dbg_append_str(dbg, dbg_pos, 2048, "\n");                                                    \
+                                                                                                   \
+      dbg_append_str(dbg, dbg_pos, 2048, "nK32: ");                                                \
+      dbg_append_uint(dbg, dbg_pos, 2048, (uint32_t)nK32);                                         \
+      dbg_append_str(dbg, dbg_pos, 2048, "\n");                                                    \
+                                                                                                   \
+      dbg_append_str(dbg, dbg_pos, 2048, "shared_x_offset: ");                                     \
+      dbg_append_uint(dbg, dbg_pos, 2048, (uint32_t)shared_x_offset);                              \
+      dbg_append_str(dbg, dbg_pos, 2048, ", shared_d_offset: ");                                  \
+      dbg_append_uint(dbg, dbg_pos, 2048, (uint32_t)shared_d_offset);                              \
+      dbg_append_str(dbg, dbg_pos, 2048, "\n");                                                    \
+                                                                                                   \
+      dbg_append_str(x_dbg, x_pos, 1024, "x: ");                                                   \
+      dbg_append_str(d_dbg, d_pos, 1024, "d: ");                                                   \
+    }                                                                                              \
+                                                                                                   \
     uint32_t x = *x_ptr;                                                                           \
     uint32_t d = *d_ptr;                                                                           \
                                                                                                    \
-    /* never mixed pos/neg within one read in this format*/                                        \
+    if (DEBUG_GETNFROMCOUNT32) {                                                                   \
+      dbg_append_str(x_dbg, x_pos, 1024, "[w=0, off=0]=");                                         \
+      dbg_append_uint(x_dbg, x_pos, 1024, x);                                                      \
+                                                                                                   \
+      dbg_append_str(d_dbg, d_pos, 1024, "[w=0, off=0]=");                                         \
+      dbg_append_uint(d_dbg, d_pos, 1024, d);                                                      \
+    }                                                                                              \
+                                                                                                   \
+    /* STAGE 6.2 */                                                                                \
+    /* never mixed pos/neg within one read in this format */                                       \
     mixed = false;                                                                                 \
     negative = ((x & 1) ^ (d & 1));                                                                \
                                                                                                    \
@@ -105,10 +183,41 @@ getIdxToLoad<false>(int batch_index, int count_index, int sz, int m_batch, int c
       for (int i = 0; i < (nK32 - 1); i++) {                                                       \
         i_x += shared_x_offset;                                                                    \
         i_d += shared_d_offset;                                                                    \
+                                                                                                   \
         x = *(x_ptr + i_x);                                                                        \
         d = *(d_ptr + i_d);                                                                        \
+                                                                                                   \
+        if (DEBUG_GETNFROMCOUNT32) {                                                               \
+          dbg_append_str(x_dbg, x_pos, 1024, ", [w=");                                             \
+          dbg_append_uint(x_dbg, x_pos, 1024, (uint32_t)(i + 1));                                  \
+          dbg_append_str(x_dbg, x_pos, 1024, ", off=");                                           \
+          dbg_append_uint(x_dbg, x_pos, 1024, (uint32_t)i_x);                                      \
+          dbg_append_str(x_dbg, x_pos, 1024, "]=");                                               \
+          dbg_append_uint(x_dbg, x_pos, 1024, x);                                                  \
+                                                                                                   \
+          dbg_append_str(d_dbg, d_pos, 1024, ", [w=");                                             \
+          dbg_append_uint(d_dbg, d_pos, 1024, (uint32_t)(i + 1));                                  \
+          dbg_append_str(d_dbg, d_pos, 1024, ", off=");                                           \
+          dbg_append_uint(d_dbg, d_pos, 1024, (uint32_t)i_d);                                      \
+          dbg_append_str(d_dbg, d_pos, 1024, "]=");                                               \
+          dbg_append_uint(d_dbg, d_pos, 1024, d);                                                  \
+        }                                                                                          \
+                                                                                                   \
         n += __popc(x & d);                                                                        \
       }                                                                                            \
+    }                                                                                              \
+                                                                                                   \
+    if (DEBUG_GETNFROMCOUNT32) {                                                                   \
+      dbg_append_str(dbg, dbg_pos, 2048, x_dbg);                                                   \
+      dbg_append_str(dbg, dbg_pos, 2048, "\n");                                                    \
+      dbg_append_str(dbg, dbg_pos, 2048, d_dbg);                                                   \
+      dbg_append_str(dbg, dbg_pos, 2048, "\nnegative: ");                                          \
+      dbg_append_uint(dbg, dbg_pos, 2048, negative);                                               \
+      dbg_append_str(dbg, dbg_pos, 2048, "\nn_final: ");                                           \
+      dbg_append_uint(dbg, dbg_pos, 2048, n);                                                      \
+      dbg_append_str(dbg, dbg_pos, 2048, "\n");                                                    \
+                                                                                                   \
+      printf("%s", dbg);                                                                           \
     }                                                                                              \
   }
 
@@ -134,6 +243,7 @@ DEFINE_GETNFROMCOUNT32(
     FPTYPE x = *x_ptr;                                                                             \
     FPTYPE d = *d_ptr;                                                                             \
                                                                                                    \
+    printf("COUNTFP");                                                                              \
     /* never mixed pos/neg within one read in this format*/                                        \
     mixed = false;                                                                                 \
     negative = ((x < (FPTYPE)0.0) != (d < (FPTYPE)0.0)) ? 1 : 0;                                   \
@@ -205,6 +315,7 @@ DEFINE_GETNFROMCOUNTFP(
                                                                                                    \
     uint64_t x = *x_ptr;                                                                           \
     uint64_t d = *d_ptr;                                                                           \
+    printf("COUNT64");                                                                              \
                                                                                                    \
     uint32_t neg = ((uint32_t)(x >> 32)) ^ ((uint32_t)(d >> 32));                                  \
     /* probably overkill, anyway do it explicitly*/                                                \
@@ -849,6 +960,7 @@ __global__ void kernelUpdateWBatchFunctor(
 
 #define RPU_UWBS_LOAD_COUNTS_N(COUNT_T, ENFORCE_MIXED)                                             \
                                                                                                    \
+  /* STAGE 6.1 */                                                                                  \
   int d_shared_index = d_sub_idx + d_shared_offset;                                                \
   int x_shared_index = x_sub_idx + x_shared_offset;                                                \
   d_shared_offset += load_d_offset;                                                                \

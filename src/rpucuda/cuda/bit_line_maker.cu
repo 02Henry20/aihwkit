@@ -2207,52 +2207,104 @@ void BitLineMaker<T>::makeCounts(
           dev_x_counts_bo64_->getData(), dev_d_counts_bo64_->getData(), dev_x_counts_->getData(),
           dev_d_counts_->getData(), m_batch, current_BL_, current_ublm_);
     }
+  
+  if (format_ == BLMOutputFormat::UI32 || format_ == BLMOutputFormat::UI32BO64) {
+    int Kplus1 = current_BL_ + 1;
+    int nK32 = (Kplus1 + 31) / 32;
 
-    // int size_d = dev_d_counts_->getSize();
-    // std::vector<unsigned int> host_d(size_d);
-    // cudaMemcpy(
-    //     host_d.data(), dev_d_counts_->getData(), size_d * sizeof(unsigned int),
-    //     cudaMemcpyDeviceToHost);
-    // DEBUG_DETAIL("D Count", dev_d_counts_->getData())
-    // DEBUG_DETAIL("D Count Size", size_d)
-    // for (int i = 0; i < size_d; i++) {
-    //   std::cout << host_d[i] << " ";
+    int valid_x_size = x_size_ * m_batch * nK32;
+    int valid_d_size = d_size_ * m_batch * nK32;
+
+    x_train_out_->resize(valid_x_size);
+    d_train_out_->resize(valid_d_size);
+
+    thrust::device_ptr<uint32_t> x_src =
+        thrust::device_pointer_cast(dev_x_counts_->getData());
+
+    thrust::device_ptr<uint32_t> d_src =
+        thrust::device_pointer_cast(dev_d_counts_->getData());
+
+    thrust::copy(
+        x_src,
+        x_src + valid_x_size,
+        x_train_out_->begin());
+
+    thrust::copy(
+        d_src,
+        d_src + valid_d_size,
+        d_train_out_->begin());
+
+    *out_trans_out_ = static_cast<int>(out_trans);
+    *x_size_out_ = x_size_;
+    *d_size_out_ = d_size_;
+  }  
+  // int size_d = dev_d_counts_->getSize();
+  // std::vector<unsigned int> host_d(size_d);
+  // cudaMemcpy(
+  //     host_d.data(), dev_d_counts_->getData(), size_d * sizeof(unsigned int),
+  //     cudaMemcpyDeviceToHost);
+  // for (int i = 0; i < size_d; i++) {
+  //   std::cout << host_d[i] << " ";
+  // }
+  // std::cout << std::endl;  
+  // int size_x = dev_x_counts_->getSize();
+  // std::vector<unsigned int> host_x(size_x);
+  // cudaMemcpy(
+  //     host_x.data(), dev_x_counts_->getData(), size_x * sizeof(unsigned int),
+  //     cudaMemcpyDeviceToHost);
+  // for (int i = 0; i < size_x; i++) {
+  //   std::cout << host_x[i] << " ";
+  // }
+  // std::cout << std::endl;
+
+  // int nK32 = (Kplus1 + 31) / 32;
+
+  // std::cout << "\n===== BLM DEBUG INFO =====\n";
+
+  // std::cout << "m_batch: " << m_batch << "\n";
+  // std::cout << "x_size_: " << x_size_ << "\n";
+  // std::cout << "d_size_: " << d_size_ << "\n";
+  // std::cout << "current_BL_: " << current_BL_ << "\n";
+  // std::cout << "Kplus1: " << Kplus1 << "\n";
+  // std::cout << "nK32: " << nK32 << "\n";
+
+  // std::cout << "x_trans: " << x_trans << "\n";
+  // std::cout << "d_trans: " << d_trans << "\n";
+  // std::cout << "out_trans: " << out_trans << "\n";
+  // std::cout << "use_bo64: " << use_bo64 << "\n";
+
+  // std::cout << "size_x: " << size_x << "\n";
+  // std::cout << "size_d: " << size_d << "\n";
+
+  // std::cout << "\nExpected sizes if layout is [batch][feature][word]:\n";
+  // std::cout << "expected_x_size = m_batch * x_size_ * nK32 = "
+  //           << m_batch * x_size_ * nK32 << "\n";
+  // std::cout << "expected_d_size = m_batch * d_size_ * nK32 = "
+  //           << m_batch * d_size_ * nK32 << "\n";
+
+  // std::cout << "===== END BLM DEBUG INFO =====\n";
+
+    // DEBUG_DETAIL("X Count Type", typeid(dev_x_counts_).name())
+    // DEBUG_DETAIL("D Count Type", typeid(dev_d_counts_).name())
+    // DEBUG_DETAIL("X Count Size", sizeof(dev_x_counts_->getSize()))
+    // DEBUG_DETAIL("D Count Size", sizeof(dev_d_counts_->getSize()))
+
+    // if (use_bo64 > 1) {
+    //   DEBUG_DETAIL("X Count BO64", dev_x_counts_bo64_->getData())
+    //   DEBUG_DETAIL("D COUNT BO64", dev_d_counts_bo64_->getData())
+    //   DEBUG_DETAIL("X Count BO64 Size", sizeof(dev_x_counts_bo64_))
+    //   DEBUG_DETAIL("D COUNT BO64 Size", sizeof(dev_d_counts_bo64_))
     // }
-    // std::cout << std::endl;
 
-    // int size_x = dev_x_counts_->getSize();
-    // std::vector<unsigned int> host_x(size_x);
-    // cudaMemcpy(
-    //     host_x.data(), dev_x_counts_->getData(), size_x * sizeof(unsigned int),
-    //     cudaMemcpyDeviceToHost);
-    // DEBUG_DETAIL("X Count", dev_x_counts_->getData())
-    // DEBUG_DETAIL("X Count Size", size_x)
-    // for (int i = 0; i < size_x; i++) {
-    //   std::cout << host_x[i] << " ";
-    // }
-    // std::cout << std::endl;
+    // DEBUG_DETAIL("use_umh", use_umh)
+    // DEBUG_DETAIL("Kplus1", Kplus1)
+    // DEBUG_DETAIL("current_m_batch_", current_m_batch_)
+    // DEBUG_DETAIL("current_out_trans_", current_out_trans_)
+    // DEBUG_DETAIL("current_ublm_", current_ublm_)
+    // DEBUG_DETAIL("current_lr_", current_lr_)
+    // DEBUG_DETAIL("current_d_sparsity_", current_d_sparsity_)
+    // DEBUG_DETAIL("current_BL_", current_BL_)
 
-
-    DEBUG_DETAIL("X Count Type", typeid(dev_x_counts_).name())
-    DEBUG_DETAIL("D Count Type", typeid(dev_d_counts_).name())
-    DEBUG_DETAIL("X Count Size", sizeof(dev_x_counts_->getSize()))
-    DEBUG_DETAIL("D Count Size", sizeof(dev_d_counts_->getSize()))
-
-    if (use_bo64 > 1) {
-      DEBUG_DETAIL("X Count BO64", dev_x_counts_bo64_->getData())
-      DEBUG_DETAIL("D COUNT BO64", dev_d_counts_bo64_->getData())
-      DEBUG_DETAIL("X Count BO64 Size", sizeof(dev_x_counts_bo64_))
-      DEBUG_DETAIL("D COUNT BO64 Size", sizeof(dev_d_counts_bo64_))
-    }
-
-    DEBUG_DETAIL("use_umh", use_umh)
-    DEBUG_DETAIL("Kplus1", Kplus1)
-    DEBUG_DETAIL("current_m_batch_", current_m_batch_)
-    DEBUG_DETAIL("current_out_trans_", current_out_trans_)
-    DEBUG_DETAIL("current_ublm_", current_ublm_)
-    DEBUG_DETAIL("current_lr_", current_lr_)
-    DEBUG_DETAIL("current_d_sparsity_", current_d_sparsity_)
-    DEBUG_DETAIL("current_BL_", current_BL_)
 
 
     // TODO: check this debug code
