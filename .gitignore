@@ -169,3 +169,8 @@ cython_debug/
 # Custom 
 *.so.6
 /runs
+
+cuda-keyring*
+Notes/plots
+Notes/2026*
+*test.py

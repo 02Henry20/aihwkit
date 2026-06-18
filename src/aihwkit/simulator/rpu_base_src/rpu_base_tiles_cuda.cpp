@@ -16,6 +16,10 @@
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 #include <vector>
+#include <pybind11/numpy.h>
+#include <cstring>
+#include <thrust/device_ptr.h>
+
 
 #define CHECK_CUDA(x)                                                                              \
   TORCH_CHECK(                                                                                     \
@@ -323,58 +327,70 @@ void declare_rpu_tiles_cuda(py::module &m, std::string type_name_add, bool add_u
       .def(
           "get_trains",
           [](Class &self) {
-            if (!self.x_train_out_) {
-              throw std::runtime_error("x_train_out_ is null. makeCounts() was probably not called yet.");
-            }
+              if (!self.x_train_out_) {
+                  throw std::runtime_error("x_train_out_ is null. makeCounts() was probably not called yet.");
+              }
 
-            if (!self.d_train_out_) {
-              throw std::runtime_error("d_train_out_ is null. makeCounts() was probably not called yet.");
-            }
+              if (!self.d_train_out_) {
+                  throw std::runtime_error("d_train_out_ is null. makeCounts() was probably not called yet.");
+              }
 
-            if (!self.out_trans_out_) {
-              throw std::runtime_error("out_trans_out_ is null.");
-            }
+              if (!self.out_trans_out_) {
+                  throw std::runtime_error("out_trans_out_ is null.");
+              }
 
-            if (!self.x_size_out_) {
-              throw std::runtime_error("x_size_out_ is null.");
-            }
+              if (!self.x_size_out_) {
+                  throw std::runtime_error("x_size_out_ is null.");
+              }
 
-            if (!self.d_size_out_) {
-              throw std::runtime_error("d_size_out_ is null.");
-            }
+              if (!self.d_size_out_) {
+                  throw std::runtime_error("d_size_out_ is null.");
+              }
 
-            if (self.x_train_out_->empty()) {
-              throw std::runtime_error("x_train_out_ is empty.");
-            }
+              if (self.x_train_out_->empty()) {
+                  throw std::runtime_error("x_train_out_ is empty.");
+              }
 
-            if (self.d_train_out_->empty()) {
-              throw std::runtime_error("d_train_out_ is empty.");
-            }
+              if (self.d_train_out_->empty()) {
+                  throw std::runtime_error("d_train_out_ is empty.");
+              }
 
-            if (*self.x_size_out_ <= 0) {
-              throw std::runtime_error("x_size_out_ is invalid.");
-            }
+              if (*self.x_size_out_ <= 0) {
+                  throw std::runtime_error("x_size_out_ is invalid.");
+              }
 
-            if (*self.d_size_out_ <= 0) {
-              throw std::runtime_error("d_size_out_ is invalid.");
-            }
+              if (*self.d_size_out_ <= 0) {
+                  throw std::runtime_error("d_size_out_ is invalid.");
+              }
 
-            thrust::host_vector<uint32_t> host_x = *(self.x_train_out_);
-            thrust::host_vector<uint32_t> host_d = *(self.d_train_out_);
+              auto host_vector_to_numpy = [](const thrust::host_vector<uint32_t> &vec) {
+                  py::array_t<uint32_t> arr(vec.size());
 
-            py::dict result;
+                  const uint32_t *src = thrust::raw_pointer_cast(vec.data());
+                  uint32_t *dst = static_cast<uint32_t *>(arr.mutable_data());
 
-            result["x_train"] =
-                std::vector<uint32_t>(host_x.begin(), host_x.end());
+                  {
+                      py::gil_scoped_release release;
+                      std::memcpy(
+                          dst,
+                          src,
+                          vec.size() * sizeof(uint32_t)
+                      );
+                  }
 
-            result["d_train"] =
-                std::vector<uint32_t>(host_d.begin(), host_d.end());
+                  return arr;
+              };
 
-            result["out_trans"] = *self.out_trans_out_;
-            result["x_size"] = *self.x_size_out_;
-            result["d_size"] = *self.d_size_out_;
+              py::dict result;
 
-            return result;
+              result["x_train"] = host_vector_to_numpy(*self.x_train_out_);
+              result["d_train"] = host_vector_to_numpy(*self.d_train_out_);
+
+              result["out_trans"] = *self.out_trans_out_;
+              result["x_size"] = *self.x_size_out_;
+              result["d_size"] = *self.d_size_out_;
+
+              return result;
           }
       )
       .def(
