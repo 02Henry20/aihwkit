@@ -207,7 +207,8 @@ void PulsedWeightUpdater<T>::tuneUpdate(
       min_i = k;
     }
   }
-
+  // std::cout << "Tuning Done" << std::endl;
+  
   CUDA_TIMING_DESTROY;
   is_async_update_ = is_async_update;
 

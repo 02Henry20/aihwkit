@@ -151,3 +151,14 @@ if (ublm) {
 
 
 1.4.0 like 1.1.0 but enables functionality to extract the actual pulse trains
+
+1.4.1 like 1.4.0 but now add following: the x trains are ordered, meaning all the 1s come at the beginning and all the zeros at the end, d train remain unchanged
+1.4.2 like 1.4.0 but now add following: the d trains are ordered, meaning all the 1s come at the beginning and all the zeros at the end, x train remain unchanged
+
+
+1.4.3 like 1.4.0 but now add following: the x trains are ordered and then permutated, meaning all the 1s come at the beginning and all the zeros at the end. after that the trains columns are permutated, d train remain unchanged
+1.4.4 like 1.4.0 but now add following: the d trains are ordered and then permutated, meaning all the 1s come at the beginning and all the zeros at the end. after that the trains columns are permutated, x train remain unchanged
+
+
+1.4.5 like 1.4.0 but now add following: the x is smartly ordered using group sorting algorithm. The groups are ordered in a burst manner
+1.4.6 like 1.4.0 but now add following: the x is smartly ordered using group sorting algorithm. The groups are ordered in a burst manner but then randomly permutated afterwards

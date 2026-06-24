@@ -203,7 +203,8 @@ __device__ __forceinline__ void getCountsSimpleLoop(
     curandState &local_state,
     int nK32,
     int sz,
-    kagg_t Kc);
+    kagg_t Kc,
+    bool sorted);
 
 #define DISCRETIZE_VALUE_STOCH_DEFINITIONS                                                         \
   T res = resolution;                                                                              \
@@ -491,57 +492,194 @@ template int debugKernelUpdateGetCounts_Linear<half_t, 32>(
 #endif
 
 } // namespace test_helper
+__device__ __forceinline__ void set_repeated_group_burst_range(
+    uint32_t *c,
+    int sz,
+    int logical_start,
+    int range_length) {
+  int logical_position = logical_start;
+  const int logical_end = logical_start + range_length;
 
-// *********************************************************************************
-// kernelUpdateGetCountsBatch_Loop2
+  while (logical_position < logical_end) {
+    int word_index;
+    int bit_index;
 
-#define GET_COUNTS_INNER_LOOP(SCALEPROB)                                                           \
-   /* STAGE 3.4 */                                                                                                \
-  negative = value < (T)0.0;                                                                       \
-  value = (negative) ? -value : value;                                                             \
-                                                                                                   \
-  value *= SCALEPROB;                                                                              \
-                                                                                                   \
-  if (laneId == 0) {                                                                               \
-    DISCRETIZE_VALUE_STOCH(local_state);                                                           \
-    NUMBER_OF_ZEROS_COMPUTE;                                                                       \
-  }                                                                                                \
-  value = __shfl_sync(0xFFFFFFFF, value, 0);                                                       \
-                                                                                                   \
-  int isize = 0;                                                                                   \
-                                                                                                   \
-  PRAGMA(unroll)                                                                                   \
-  for (int i = 0; i < nK32; i++) {                                                                 \
-                                                                                                   \
-    stoch_value = curand_uniform(&local_state);                                                    \
-                                                                                                   \
-    ballot = __ballot_sync(0xFFFFFFFF, stoch_value < value);                                       \
-                                                                                                   \
-    if (laneId == 0) {                                                                             \
-      if (i == 0) {                                                                                \
-        ballot = (negative) ? (ballot | one) : (ballot & ~one);                                    \
-      }                                                                                            \
-                                                                                                   \
-      if (i == nK32m1) {                                                                           \
-        ballot = ballot & lastK32mask;                                                             \
-      }                                                                                            \
-                                                                                                   \
-      *(c + isize) = ballot;                                                                       \
-      isize += sz;                                                                                 \
-    }                                                                                              \
+    /* Logical pulse position 0 starts at bit 1 of word 0 because bit 0
+       is reserved for the sign. All later words use all 32 bits. */
+    if (logical_position < 31) {
+      word_index = 0;
+      bit_index = logical_position + 1;
+    } else {
+      const int packed_position = logical_position - 31;
+      word_index = 1 + (packed_position >> 5);
+      bit_index = packed_position & 31;
+    }
+
+    const int capacity = 32 - bit_index;
+    const int remaining = logical_end - logical_position;
+    const int take = remaining < capacity ? remaining : capacity;
+
+    const uint32_t range_mask =
+        take == 32
+            ? 0xFFFFFFFFu
+            : ((((uint32_t)1u << take) - 1u) << bit_index);
+
+    *(c + word_index * sz) |= range_mask;
+    logical_position += take;
   }
+}
 
-#define GET_COUNTS_LOOP(PROB, SIZE, COUNTS, SCALEPROB)                                             \
+#define GET_COUNTS_INNER_LOOP(SCALEPROB, SORTED)                                      \
+    /*STAGE 3.4*/                                                                       \
+                                                                                       \
+    negative = value < (T)0.0;                                                         \
+    value = negative ? -value : value;                                                 \
+    value *= SCALEPROB;                                                                \
+                                                                                       \
+    if (laneId == 0) {                                                                 \
+      DISCRETIZE_VALUE_STOCH(local_state);                                              \
+      NUMBER_OF_ZEROS_COMPUTE;                                                         \
+    }                                                                                  \
+                                                                                       \
+    value = __shfl_sync(0xFFFFFFFF, value, 0);                                          \
+                                                                                       \
+    int isize = 0;                                                                     \
+    int pulse_count = 0;                                                               \
+                                                                                       \
+    /* Generate the original stochastic pulse train. When SORTED is enabled,          \
+       retain only its population count. */                                             \
+    PRAGMA(unroll)                                                                     \
+    for (int i = 0; i < nK32; i++) {                                                   \
+      stoch_value = curand_uniform(&local_state);                                       \
+                                                                                       \
+      ballot = __ballot_sync(                                                          \
+          0xFFFFFFFF,                                                                  \
+          stoch_value < value);                                                        \
+                                                                                       \
+      if (laneId == 0) {                                                               \
+        if (i == 0) {                                                                  \
+          ballot = negative                                                            \
+                       ? (ballot | (uint32_t)one)                                       \
+                       : (ballot & ~((uint32_t)one));                                   \
+        }                                                                              \
+                                                                                       \
+        if (i == nK32m1) {                                                             \
+          ballot &= (uint32_t)lastK32mask;                                             \
+        }                                                                              \
+                                                                                       \
+        if (SORTED) {                                                                  \
+          uint32_t pulse_ballot = ballot;                                               \
+                                                                                       \
+          if (i == 0) {                                                                \
+            pulse_ballot &= ~((uint32_t)one);                                           \
+          }                                                                            \
+                                                                                       \
+          pulse_count += __popc(pulse_ballot);                                          \
+        } else {                                                                       \
+          *(c + isize) = ballot;                                                       \
+        }                                                                              \
+                                                                                       \
+        isize += sz;                                                                   \
+      }                                                                                \
+    }                                                                                  \
+                                                                                       \
+    /* Re-encode the population count using contiguous repeated groups.                \
+                                                                                       \
+       Example for pulse_length = 5: group sizes are (1, 1, 3), so the                 \
+       burst layout is A B C C C. A pulse_count of 4 activates one                     \
+       size-1 group and the size-3 group, producing 0 1 1 1 1. */                      \
+    if (SORTED && laneId == 0) {                                                       \
+      int pulse_length = 0;                                                            \
+      isize = 0;                                                                       \
+                                                                                       \
+      /* Clear the old train, retain the sign bit, and determine the usable BL. */      \
+      PRAGMA(unroll)                                                                   \
+      for (int i = 0; i < nK32; i++) {                                                 \
+        uint32_t valid_mask = 0xFFFFFFFFu;                                              \
+                                                                                       \
+        if (i == nK32m1) {                                                             \
+          valid_mask &= (uint32_t)lastK32mask;                                         \
+        }                                                                              \
+                                                                                       \
+        if (i == 0) {                                                                  \
+          valid_mask &= ~((uint32_t)one);                                               \
+        }                                                                              \
+                                                                                       \
+        pulse_length += __popc(valid_mask);                                             \
+        *(c + isize) = ((i == 0) && negative) ? (uint32_t)one : 0u;                    \
+        isize += sz;                                                                   \
+      }                                                                                \
+                                                                                       \
+      if (pulse_length > 0) {                                                          \
+        /* G = bit_length(BL) = ceil(log2(BL + 1)). */                                  \
+        const int group_count =                                                        \
+            32 - __clz((uint32_t)pulse_length);                                         \
+                                                                                       \
+        /* At most 31 groups are required for a positive signed-int BL. */              \
+        int group_sizes[32];                                                           \
+        int total = pulse_length;                                                       \
+                                                                                       \
+        /* Recursive halving, stored directly from smallest to largest group.           \
+           BL=5   -> (1, 1, 3)                                                         \
+           BL=10  -> (1, 1, 3, 5)                                                     \
+           BL=100 -> (1, 2, 3, 6, 13, 25, 50) */                                      \
+        for (int group_i = group_count - 1; group_i > 0; group_i--) {                  \
+          const int preceding_sum = total >> 1;                                        \
+          group_sizes[group_i] = total - preceding_sum;                                \
+          total = preceding_sum;                                                       \
+        }                                                                              \
+        group_sizes[0] = total;                                                        \
+                                                                                       \
+        /* Represent pulse_count as a subset of groups. The complete group              \
+           construction guarantees that largest-first selection is exact. */           \
+        uint32_t active_groups = 0u;                                                    \
+        int remaining_pulses = pulse_count;                                             \
+                                                                                       \
+        for (int group_i = group_count - 1; group_i >= 0; group_i--) {                 \
+          const int group_size = group_sizes[group_i];                                  \
+                                                                                       \
+          if (group_size <= remaining_pulses) {                                         \
+            active_groups |= ((uint32_t)1u << group_i);                                 \
+            remaining_pulses -= group_size;                                             \
+          }                                                                            \
+        }                                                                              \
+                                                                                       \
+        /* Assign groups contiguously: A...A B...B C...C. Selected groups               \
+           become one-runs; unselected groups remain zero. */                          \
+        int group_start = 0;                                                           \
+                                                                                       \
+        for (int group_i = 0; group_i < group_count; group_i++) {                      \
+          const int group_size = group_sizes[group_i];                                  \
+                                                                                       \
+          if ((active_groups & ((uint32_t)1u << group_i)) != 0u) {                     \
+            set_repeated_group_burst_range(                                             \
+                c,                                                                      \
+                sz,                                                                     \
+                group_start,                                                            \
+                group_size);                                                            \
+          }                                                                            \
+                                                                                       \
+          group_start += group_size;                                                    \
+        }                                                                              \
+      }                                                                                \
+    }                                                                                  \
+                                                                                       \
+    if (SORTED) {                                                                      \
+      /* Ensure every train has been fully reconstructed before it is consumed. */      \
+      __syncthreads();                                                                 \
+    }
+
+#define GET_COUNTS_LOOP(PROB, SIZE, COUNTS, SCALEPROB, SORTED)                                             \
   sz = SIZE;                                                                                       \
   /* STAGE 3.3 */                                                                                   \
   if (sourceId < sz) {                                                                             \
     value = PROB[sourceId];                                                                        \
     c = &COUNTS[sourceId];                                                                         \
                                                                                                    \
-    GET_COUNTS_INNER_LOOP(SCALEPROB);                                                              \
+    GET_COUNTS_INNER_LOOP(SCALEPROB, SORTED);                                                              \
   }
 
-#define GET_COUNTS_LOOP_BATCH(PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS)                      \
+#define GET_COUNTS_LOOP_BATCH(PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SORTED)                      \
   {                                                                                                \
     sz = SIZE;                                                                                     \
     int counts_offset = nK32 * sz;                                                                 \
@@ -553,7 +691,7 @@ template int debugKernelUpdateGetCounts_Linear<half_t, 32>(
         value = PROB[sourceId];                                                                    \
         c = &COUNTS[getCountsIdx<TRANS, OUTTRANS, uint32_t>(                                       \
             sourceId, sz, m_batch, counts_offset)];                                                \
-        GET_COUNTS_INNER_LOOP(SCALEPROB);                                                          \
+        GET_COUNTS_INNER_LOOP(SCALEPROB, SORTED);                                                          \
       }                                                                                            \
     }                                                                                              \
   }
@@ -617,11 +755,11 @@ __global__ void kernelUpdateGetCountsBatch_Loop2(
     // NOTE: need to re-order in update from SIZE*nK32 format, when it is trans!
 
     // d input
-    GET_COUNTS_LOOP_BATCH(d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans);
+    GET_COUNTS_LOOP_BATCH(d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans, false);
 
     // x input
     compute_noz_if = false;
-    GET_COUNTS_LOOP_BATCH(x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans);
+    GET_COUNTS_LOOP_BATCH(x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, true);
 
     // save new random states
     random_states[tid] = local_state;
@@ -891,6 +1029,7 @@ getScaleProb<half_t, false>(const half_t scaleprob, const int K, const half_t lr
 
 #endif
 
+
 template <>
 __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
     float value,
@@ -901,36 +1040,201 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
     curandState &local_state,
     int nK32,
     int sz,
-    kagg_t Kc) {
+    kagg_t Kc,
+    bool sorted) {
+  /* STAGE 3.4 BATCH */
 
-  uint32_t ballot = (negative) ? 1 : 0;
-  int nK32m1_local = MIN(K >> 5, nK32m1);
-  int nn = (nK32m1_local > 0) ? 31 : K;
+  uint32_t ballot =
+      negative ? (uint32_t)1u : (uint32_t)0u;
+
+  int pulse_count = 0;
+
+  const int nK32m1_local =
+      MIN(K >> 5, nK32m1);
+
+  int nn =
+      (nK32m1_local > 0) ? 31 : K;
+
+  /*
+   * Generate the original stochastic pulse train.
+   *
+   * If sorted == false, write the generated train directly.
+   * If sorted == true, retain only its population count. The pulse positions
+   * are reconstructed later using repeated-group burst ordering.
+   *
+   * First packed word:
+   *   bit 0     = sign
+   *   bits 1-31 = logical pulse positions 0-30
+   */
   PRAGMA(unroll)
   for (int j = 1; j <= nn; j++) {
-    float stoch_value = curand_uniform(&local_state);
-    ballot |= (stoch_value < value) ? (((uint32_t)1) << j) : (uint32_t)0;
+    const float stoch_value =
+        curand_uniform(&local_state);
+
+    const bool pulse =
+        stoch_value < value;
+
+    if (sorted) {
+      pulse_count += pulse ? 1 : 0;
+    } else if (pulse) {
+      ballot |= (uint32_t)1u << j;
+    }
   }
-  *c = ballot;
+
+  if (!sorted) {
+    *c = ballot;
+  }
+
+  /*
+   * Remaining packed words.
+   */
   if (nK32 > 1) {
-    ballot = 0;
     int offset = 0;
+
     PRAGMA(unroll)
     for (int i = 1; i < nK32; i++) {
       offset += sz;
+
       if (i > nK32m1_local) {
-        *(c + offset) = 0;
+        if (!sorted) {
+          *(c + offset) = 0u;
+        }
       } else {
-        ballot = 0;
-        nn = (i == nK32m1_local) ? (K & 0x1f) : 31;
+        ballot = 0u;
+
+        nn = (i == nK32m1_local)
+                 ? (K & 0x1f)
+                 : 31;
+
         PRAGMA(unroll)
         for (int j = 0; j <= nn; j++) {
-          float stoch_value = curand_uniform(&local_state);
-          ballot |= (stoch_value < value) ? (((uint32_t)1) << j) : (uint32_t)0;
+          const float stoch_value =
+              curand_uniform(&local_state);
+
+          const bool pulse =
+              stoch_value < value;
+
+          if (sorted) {
+            pulse_count += pulse ? 1 : 0;
+          } else if (pulse) {
+            ballot |= (uint32_t)1u << j;
+          }
         }
-        *(c + offset) = ballot;
+
+        if (!sorted) {
+          *(c + offset) = ballot;
+        }
       }
     }
+  }
+
+  if (sorted) {
+    /*
+     * Replace the previous 111...000 + Fisher-Yates path with direct
+     * repeated-group burst encoding.
+     *
+     * Example for K = 5:
+     *   group sizes = (1, 1, 3)
+     *   burst layout = A B C C C
+     *
+     * pulse_count = 4 selects the size-3 group and one size-1 group,
+     * producing 0 1 1 1 1 while preserving the population count.
+     */
+
+    /* Clear every packed word and retain only the sign bit. */
+    int offset = 0;
+
+    PRAGMA(unroll)
+    for (int i = 0; i < nK32; i++) {
+      *(c + offset) =
+          ((i == 0) && negative)
+              ? (uint32_t)1u
+              : 0u;
+      offset += sz;
+    }
+
+    if (K > 0) {
+      /*
+       * Minimum complete group count:
+       *
+       *   G = bit_length(K) = ceil(log2(K + 1))
+       *
+       * Examples:
+       *   K = 5   -> G = 3
+       *   K = 10  -> G = 4
+       *   K = 100 -> G = 7
+       */
+      const int group_count =
+          32 - __clz((uint32_t)K);
+
+      /*
+       * Construct group sizes from smallest to largest by recursive halving.
+       *
+       *   K = 5   -> (1, 1, 3)
+       *   K = 10  -> (1, 1, 3, 5)
+       *   K = 100 -> (1, 2, 3, 6, 13, 25, 50)
+       *
+       * For a positive signed-int K, at most 31 groups are needed.
+       */
+      int group_sizes[32];
+      int total = K;
+
+      for (int group_i = group_count - 1;
+           group_i > 0;
+           group_i--) {
+        const int preceding_sum = total >> 1;
+        group_sizes[group_i] = total - preceding_sum;
+        total = preceding_sum;
+      }
+      group_sizes[0] = total;
+
+      /*
+       * Represent pulse_count as a subset of complete groups.
+       * Largest-first selection is exact for this group construction.
+       */
+      uint32_t active_groups = 0u;
+      int remaining_pulses = pulse_count;
+
+      for (int group_i = group_count - 1;
+           group_i >= 0;
+           group_i--) {
+        const int group_size = group_sizes[group_i];
+
+        if (group_size <= remaining_pulses) {
+          active_groups |= ((uint32_t)1u << group_i);
+          remaining_pulses -= group_size;
+        }
+      }
+
+      /*
+       * Assign groups contiguously in logical pulse order:
+       *
+       *   A...A B...B C...C ...
+       *
+       * Selected groups become contiguous one-runs. Unselected groups remain
+       * zero. No random permutation is applied afterward.
+       */
+      int group_start = 0;
+
+      for (int group_i = 0;
+           group_i < group_count;
+           group_i++) {
+        const int group_size = group_sizes[group_i];
+
+        if ((active_groups & ((uint32_t)1u << group_i)) != 0u) {
+          set_repeated_group_burst_range(
+              c,
+              sz,
+              group_start,
+              group_size);
+        }
+
+        group_start += group_size;
+      }
+    }
+
+    /* Preserve the synchronization point from the previous sorted path. */
+    __syncthreads();
   }
 }
 
@@ -944,7 +1248,8 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
     curandState &local_state,
     int nK32,
     int sz,
-    kagg_t Kc) {
+    kagg_t Kc,
+    bool sorted) {
   static_assert(sizeof(uint64_t) == sizeof(unsigned long long int), "uint64 issue");
 
   // nK32m1 NEEDS TO BE 0 (otherwise not supported)
@@ -974,7 +1279,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
 }
 
 #define GET_COUNTS_SIMPLE_LOOP_BATCH(                                                              \
-    PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SPROPOP, TIDSTART, TIDEND, TIDN)               \
+    PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SPROPOP, TIDSTART, TIDEND, TIDN, SORTED)               \
   {                                                                                                \
       /*STAGE 3.3 BATCH*/                                                                          \
     if ((tid >= TIDSTART) && (tid < TIDEND)) {                                                     \
@@ -1007,7 +1312,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
           kagg_t Kc = getKc<update_bl_management, count_t>(Kc_values, batch_idx, Kplus1);          \
           count_t *c = &COUNTS[getCountsIdx<TRANS, OUTTRANS, count_t>(                             \
               idx, sz, m_batch, counts_offset, K, Kc, nB)];                                        \
-          getCountsSimpleLoop<count_t>(value, negative, c, nK32m1, K, local_state, nK32, sz, Kc);  \
+          getCountsSimpleLoop<count_t>(value, negative, c, nK32m1, K, local_state, nK32, sz, Kc, SORTED);  \
         }                                                                                          \
       }                                                                                            \
     }                                                                                              \
@@ -1098,12 +1403,12 @@ __global__ void kernelUpdateGetCountsBatch_SimpleLoop2(
     // d input
     GET_COUNTS_SIMPLE_LOOP_BATCH(
         d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans, *, tid_nx, tid_nx + tid_nd,
-        tid_nd);
+        tid_nd, false);
 
     // x input
     compute_noz_if = false;
     GET_COUNTS_SIMPLE_LOOP_BATCH(
-        x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, /, 0, tid_nx, tid_nx);
+        x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, /, 0, tid_nx, tid_nx, true);
 
     // save new random states
     random_states[tid] = local_state;
@@ -1208,11 +1513,11 @@ __global__ void kernelUpdateGetCounts_Loop2(
     int sz;
 
     // d input
-    GET_COUNTS_LOOP(d_prob, d_size, d_counts, d_scaleprob);
+    GET_COUNTS_LOOP(d_prob, d_size, d_counts, d_scaleprob, false);
 
     // x input
     compute_noz_if = false;
-    GET_COUNTS_LOOP(x_prob, x_size, x_counts, x_scaleprob);
+    GET_COUNTS_LOOP(x_prob, x_size, x_counts, x_scaleprob, true);
 
     // save new random states
     random_states[tid] = local_state;
