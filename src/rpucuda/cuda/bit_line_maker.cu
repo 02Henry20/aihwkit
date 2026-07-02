@@ -492,6 +492,7 @@ template int debugKernelUpdateGetCounts_Linear<half_t, 32>(
 #endif
 
 } // namespace test_helper
+/* Set one contiguous logical pulse range in the packed train. */
 __device__ __forceinline__ void set_repeated_group_burst_range(
     uint32_t *c,
     int sz,
@@ -504,8 +505,7 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
     int word_index;
     int bit_index;
 
-    /* Logical pulse position 0 starts at bit 1 of word 0 because bit 0
-       is reserved for the sign. All later words use all 32 bits. */
+    /* Logical pulse 0 starts at bit 1 because bit 0 stores the sign. */
     if (logical_position < 31) {
       word_index = 0;
       bit_index = logical_position + 1;
@@ -529,8 +529,71 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
   }
 }
 
+/* Swap two logical pulse positions without touching the sign bit. */
+__device__ __forceinline__ void swap_repeated_group_pulse_positions(
+    uint32_t *c,
+    int sz,
+    int logical_i,
+    int logical_j) {
+  if (logical_i == logical_j) {
+    return;
+  }
+
+  int word_i;
+  int bit_i;
+  int word_j;
+  int bit_j;
+
+  if (logical_i < 31) {
+    word_i = 0;
+    bit_i = logical_i + 1;
+  } else {
+    const int packed_i = logical_i - 31;
+    word_i = 1 + (packed_i >> 5);
+    bit_i = packed_i & 31;
+  }
+
+  if (logical_j < 31) {
+    word_j = 0;
+    bit_j = logical_j + 1;
+  } else {
+    const int packed_j = logical_j - 31;
+    word_j = 1 + (packed_j >> 5);
+    bit_j = packed_j & 31;
+  }
+
+  uint32_t *address_i = c + word_i * sz;
+  uint32_t *address_j = c + word_j * sz;
+
+  const uint32_t mask_i = (uint32_t)1u << bit_i;
+  const uint32_t mask_j = (uint32_t)1u << bit_j;
+
+  if (word_i == word_j) {
+    const uint32_t word = *address_i;
+    const bool value_i = (word & mask_i) != 0u;
+    const bool value_j = (word & mask_j) != 0u;
+
+    if (value_i != value_j) {
+      *address_i = word ^ mask_i ^ mask_j;
+    }
+  } else {
+    const uint32_t value_i = *address_i;
+    const uint32_t value_j = *address_j;
+    const bool bit_value_i = (value_i & mask_i) != 0u;
+    const bool bit_value_j = (value_j & mask_j) != 0u;
+
+    if (bit_value_i != bit_value_j) {
+      *address_i = value_i ^ mask_i;
+      *address_j = value_j ^ mask_j;
+    }
+  }
+}
+
+
+
 #define GET_COUNTS_INNER_LOOP(SCALEPROB, SORTED)                                      \
-    /*STAGE 3.4*/                                                                       \
+    /* STAGE 3.4 */                                                                     \
+    __shared__ uint32_t shared_group_permutation_seed;                                 \
                                                                                        \
     negative = value < (T)0.0;                                                         \
     value = negative ? -value : value;                                                 \
@@ -545,9 +608,9 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
                                                                                        \
     int isize = 0;                                                                     \
     int pulse_count = 0;                                                               \
+    int pulse_length = 0;                                                              \
                                                                                        \
-    /* Generate the original stochastic pulse train. When SORTED is enabled,          \
-       retain only its population count. */                                             \
+    /* Generate the stochastic train. For SORTED, retain only its count. */             \
     PRAGMA(unroll)                                                                     \
     for (int i = 0; i < nK32; i++) {                                                   \
       stoch_value = curand_uniform(&local_state);                                       \
@@ -569,11 +632,9 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
                                                                                        \
         if (SORTED) {                                                                  \
           uint32_t pulse_ballot = ballot;                                               \
-                                                                                       \
           if (i == 0) {                                                                \
             pulse_ballot &= ~((uint32_t)one);                                           \
           }                                                                            \
-                                                                                       \
           pulse_count += __popc(pulse_ballot);                                          \
         } else {                                                                       \
           *(c + isize) = ballot;                                                       \
@@ -583,24 +644,17 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
       }                                                                                \
     }                                                                                  \
                                                                                        \
-    /* Re-encode the population count using contiguous repeated groups.                \
-                                                                                       \
-       Example for pulse_length = 5: group sizes are (1, 1, 3), so the                 \
-       burst layout is A B C C C. A pulse_count of 4 activates one                     \
-       size-1 group and the size-3 group, producing 0 1 1 1 1. */                      \
+    /* Build the repeated-group burst pattern from the population count. */             \
     if (SORTED && laneId == 0) {                                                       \
-      int pulse_length = 0;                                                            \
       isize = 0;                                                                       \
                                                                                        \
-      /* Clear the old train, retain the sign bit, and determine the usable BL. */      \
+      /* Clear the train, retain sign, and determine the usable BL. */                  \
       PRAGMA(unroll)                                                                   \
       for (int i = 0; i < nK32; i++) {                                                 \
         uint32_t valid_mask = 0xFFFFFFFFu;                                              \
-                                                                                       \
         if (i == nK32m1) {                                                             \
           valid_mask &= (uint32_t)lastK32mask;                                         \
         }                                                                              \
-                                                                                       \
         if (i == 0) {                                                                  \
           valid_mask &= ~((uint32_t)one);                                               \
         }                                                                              \
@@ -611,18 +665,12 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
       }                                                                                \
                                                                                        \
       if (pulse_length > 0) {                                                          \
-        /* G = bit_length(BL) = ceil(log2(BL + 1)). */                                  \
         const int group_count =                                                        \
             32 - __clz((uint32_t)pulse_length);                                         \
-                                                                                       \
-        /* At most 31 groups are required for a positive signed-int BL. */              \
         int group_sizes[32];                                                           \
         int total = pulse_length;                                                       \
                                                                                        \
-        /* Recursive halving, stored directly from smallest to largest group.           \
-           BL=5   -> (1, 1, 3)                                                         \
-           BL=10  -> (1, 1, 3, 5)                                                     \
-           BL=100 -> (1, 2, 3, 6, 13, 25, 50) */                                      \
+        /* Recursive halving: BL=5 -> (1,1,3), BL=10 -> (1,1,3,5). */                  \
         for (int group_i = group_count - 1; group_i > 0; group_i--) {                  \
           const int preceding_sum = total >> 1;                                        \
           group_sizes[group_i] = total - preceding_sum;                                \
@@ -630,42 +678,57 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
         }                                                                              \
         group_sizes[0] = total;                                                        \
                                                                                        \
-        /* Represent pulse_count as a subset of groups. The complete group              \
-           construction guarantees that largest-first selection is exact. */           \
+        /* Select the largest complete groups whose sum is pulse_count. */              \
         uint32_t active_groups = 0u;                                                    \
         int remaining_pulses = pulse_count;                                             \
-                                                                                       \
         for (int group_i = group_count - 1; group_i >= 0; group_i--) {                 \
           const int group_size = group_sizes[group_i];                                  \
-                                                                                       \
           if (group_size <= remaining_pulses) {                                         \
             active_groups |= ((uint32_t)1u << group_i);                                 \
             remaining_pulses -= group_size;                                             \
           }                                                                            \
         }                                                                              \
                                                                                        \
-        /* Assign groups contiguously: A...A B...B C...C. Selected groups               \
-           become one-runs; unselected groups remain zero. */                          \
+        /* Write selected groups contiguously: A...A B...B C...C. */                    \
         int group_start = 0;                                                           \
-                                                                                       \
         for (int group_i = 0; group_i < group_count; group_i++) {                      \
           const int group_size = group_sizes[group_i];                                  \
-                                                                                       \
           if ((active_groups & ((uint32_t)1u << group_i)) != 0u) {                     \
             set_repeated_group_burst_range(                                             \
-                c,                                                                      \
-                sz,                                                                     \
-                group_start,                                                            \
-                group_size);                                                            \
+                c, sz, group_start, group_size);                                        \
           }                                                                            \
-                                                                                       \
           group_start += group_size;                                                    \
         }                                                                              \
       }                                                                                \
     }                                                                                  \
                                                                                        \
     if (SORTED) {                                                                      \
-      /* Ensure every train has been fully reconstructed before it is consumed. */      \
+      /* All trains must finish burst construction before permutation. */               \
+      __syncthreads();                                                                 \
+                                                                                       \
+      /* One random seed creates one common permutation for the CUDA block. */          \
+      if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {                  \
+        shared_group_permutation_seed = curand(&local_state) | 1u;                     \
+      }                                                                                \
+                                                                                       \
+      __syncthreads();                                                                 \
+                                                                                       \
+      if (laneId == 0) {                                                               \
+        uint32_t permutation_state = shared_group_permutation_seed;                     \
+                                                                                       \
+        /* Fisher-Yates over logical pulse positions; bit 0 (sign) is excluded. */      \
+        for (int pulse_i = pulse_length - 1; pulse_i > 0; pulse_i--) {                 \
+          permutation_state ^= permutation_state << 13;                                \
+          permutation_state ^= permutation_state >> 17;                                \
+          permutation_state ^= permutation_state << 5;                                 \
+                                                                                       \
+          const int pulse_j = (int)(                                                   \
+              ((uint64_t)permutation_state * (uint64_t)(pulse_i + 1)) >> 32);          \
+                                                                                       \
+          swap_repeated_group_pulse_positions(c, sz, pulse_i, pulse_j);                \
+        }                                                                              \
+      }                                                                                \
+                                                                                       \
       __syncthreads();                                                                 \
     }
 
@@ -1044,6 +1107,9 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
     bool sorted) {
   /* STAGE 3.4 BATCH */
 
+  /* Shared so every train in this CUDA block applies the same permutation. */
+  __shared__ uint32_t shared_group_permutation_seed;
+
   uint32_t ballot =
       negative ? (uint32_t)1u : (uint32_t)0u;
 
@@ -1055,22 +1121,11 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
   int nn =
       (nK32m1_local > 0) ? 31 : K;
 
-  /*
-   * Generate the original stochastic pulse train.
-   *
-   * If sorted == false, write the generated train directly.
-   * If sorted == true, retain only its population count. The pulse positions
-   * are reconstructed later using repeated-group burst ordering.
-   *
-   * First packed word:
-   *   bit 0     = sign
-   *   bits 1-31 = logical pulse positions 0-30
-   */
+  /* Generate the stochastic train. For sorted=true, retain only its count. */
   PRAGMA(unroll)
   for (int j = 1; j <= nn; j++) {
     const float stoch_value =
         curand_uniform(&local_state);
-
     const bool pulse =
         stoch_value < value;
 
@@ -1085,9 +1140,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
     *c = ballot;
   }
 
-  /*
-   * Remaining packed words.
-   */
+  /* Remaining packed words. */
   if (nK32 > 1) {
     int offset = 0;
 
@@ -1101,7 +1154,6 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
         }
       } else {
         ballot = 0u;
-
         nn = (i == nK32m1_local)
                  ? (K & 0x1f)
                  : 31;
@@ -1110,7 +1162,6 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
         for (int j = 0; j <= nn; j++) {
           const float stoch_value =
               curand_uniform(&local_state);
-
           const bool pulse =
               stoch_value < value;
 
@@ -1129,19 +1180,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
   }
 
   if (sorted) {
-    /*
-     * Replace the previous 111...000 + Fisher-Yates path with direct
-     * repeated-group burst encoding.
-     *
-     * Example for K = 5:
-     *   group sizes = (1, 1, 3)
-     *   burst layout = A B C C C
-     *
-     * pulse_count = 4 selects the size-3 group and one size-1 group,
-     * producing 0 1 1 1 1 while preserving the population count.
-     */
-
-    /* Clear every packed word and retain only the sign bit. */
+    /* Clear every word and retain only the sign bit. */
     int offset = 0;
 
     PRAGMA(unroll)
@@ -1154,31 +1193,12 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
     }
 
     if (K > 0) {
-      /*
-       * Minimum complete group count:
-       *
-       *   G = bit_length(K) = ceil(log2(K + 1))
-       *
-       * Examples:
-       *   K = 5   -> G = 3
-       *   K = 10  -> G = 4
-       *   K = 100 -> G = 7
-       */
       const int group_count =
           32 - __clz((uint32_t)K);
-
-      /*
-       * Construct group sizes from smallest to largest by recursive halving.
-       *
-       *   K = 5   -> (1, 1, 3)
-       *   K = 10  -> (1, 1, 3, 5)
-       *   K = 100 -> (1, 2, 3, 6, 13, 25, 50)
-       *
-       * For a positive signed-int K, at most 31 groups are needed.
-       */
       int group_sizes[32];
       int total = K;
 
+      /* Recursive halving: K=5 -> (1,1,3), K=10 -> (1,1,3,5). */
       for (int group_i = group_count - 1;
            group_i > 0;
            group_i--) {
@@ -1188,10 +1208,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
       }
       group_sizes[0] = total;
 
-      /*
-       * Represent pulse_count as a subset of complete groups.
-       * Largest-first selection is exact for this group construction.
-       */
+      /* Select the largest complete groups summing to pulse_count. */
       uint32_t active_groups = 0u;
       int remaining_pulses = pulse_count;
 
@@ -1206,14 +1223,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
         }
       }
 
-      /*
-       * Assign groups contiguously in logical pulse order:
-       *
-       *   A...A B...B C...C ...
-       *
-       * Selected groups become contiguous one-runs. Unselected groups remain
-       * zero. No random permutation is applied afterward.
-       */
+      /* Write the selected repeated groups as contiguous bursts. */
       int group_start = 0;
 
       for (int group_i = 0;
@@ -1233,7 +1243,38 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
       }
     }
 
-    /* Preserve the synchronization point from the previous sorted path. */
+    /* All trains must finish burst construction before permutation. */
+    __syncthreads();
+
+    /* Draw one seed for one common block-wide BL permutation. */
+    if (threadIdx.x == 0 &&
+        threadIdx.y == 0 &&
+        threadIdx.z == 0) {
+      shared_group_permutation_seed =
+          curand(&local_state) | 1u;
+    }
+
+    __syncthreads();
+
+    uint32_t permutation_state =
+        shared_group_permutation_seed;
+
+    /* Fisher-Yates over the K logical pulse bits; the sign bit is excluded. */
+    for (int pulse_i = K - 1; pulse_i > 0; pulse_i--) {
+      permutation_state ^= permutation_state << 13;
+      permutation_state ^= permutation_state >> 17;
+      permutation_state ^= permutation_state << 5;
+
+      const int pulse_j = (int)(
+          ((uint64_t)permutation_state * (uint64_t)(pulse_i + 1)) >> 32);
+
+      swap_repeated_group_pulse_positions(
+          c,
+          sz,
+          pulse_i,
+          pulse_j);
+    }
+
     __syncthreads();
   }
 }

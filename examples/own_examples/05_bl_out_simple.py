@@ -18,9 +18,9 @@ from aihwkit.simulator.rpu_base import cuda
 # PARAMETERS
 # =============================================================================
 
-BATCH_SIZE = 20
-IN_SIZE = 10
-OUT_SIZE = 8
+BATCH_SIZE = 128
+IN_SIZE = 256
+OUT_SIZE = 64
 BL = 128
 GRANULARITY = 0.01
 
@@ -188,19 +188,19 @@ def main() -> None:
     d_train = np.asarray(trains["d_train"], dtype=np.uint32).reshape(-1)
 
     # Keep the original console output.
-    print("\nx_train:")
-    print(" ".join(str(int(value)) for value in x_train))
+    # print("\nx_train:")
+    # print(" ".join(str(int(value)) for value in x_train))
 
-    print("\nd_train:")
-    print(" ".join(str(int(value)) for value in d_train))
+    # print("\nd_train:")
+    # print(" ".join(str(int(value)) for value in d_train))
 
     print(f"\nout_trans: {int(bool(trains['out_trans']))}")
     print(f"len x train: {len(x_train)}")
     print(f"len d train: {len(d_train)}")
 
-    print(f"weight_init: {weight_init}\n")
-    print(f"weight_tar: {weight_target}")
-    print(f"weight_after: {weight_after}\n")
+    # print(f"weight_init: {weight_init}\n")
+    # print(f"weight_tar: {weight_target}")
+    # print(f"weight_after: {weight_after}\n")
     print(f"granularity: {GRANULARITY}\n")
 
     saved_path = save_train_dump(
