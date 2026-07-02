@@ -162,3 +162,7 @@ if (ublm) {
 
 1.4.5 like 1.4.0 but now add following: the x is smartly ordered using group sorting algorithm. The groups are ordered in a burst manner
 1.4.6 like 1.4.0 but now add following: the x is smartly ordered using group sorting algorithm. The groups are ordered in a burst manner but then randomly permutated afterwards
+
+
+
+1.4.7 based on 1.4.0 but now each bit of a train is only compared to a single same LSFR value. D receive the LSFR of the same thing just 2 cycles delayed. LSFR is simulated. This simulates the method described in Jung Gyus Paper

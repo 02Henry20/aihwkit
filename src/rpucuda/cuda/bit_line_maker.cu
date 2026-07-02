@@ -95,7 +95,7 @@ namespace RPU {
   CudaArray<T> dev_indata(c, size, indata);                                                        \
   dev_d_noz.setConst(0);                                                                           \
   CudaArray<curandState> dev_states(c, NSTATES);                                                   \
-  curandSetup(dev_states, size, fake_seed);                                                        \
+  curandSetup(dev_states, NSTATES, fake_seed);                                                        \
   CUDA_CALL(cudaDeviceSynchronize());                                                              \
                                                                                                    \
   cudaEvent_t start, stop;                                                                         \
@@ -136,7 +136,7 @@ namespace RPU {
   CudaArray<T> dev_indata2(c, size *m_batch, tmp);                                                 \
                                                                                                    \
   CudaArray<curandState> dev_states(c, NSTATES);                                                   \
-  curandSetup(dev_states, size, fake_seed);                                                        \
+  curandSetup(dev_states, NSTATES, fake_seed);                                                        \
                                                                                                    \
   CUDA_CALL(cudaDeviceSynchronize());                                                              \
                                                                                                    \
@@ -193,6 +193,60 @@ __device__ __forceinline__ int getnB(const kagg_t *Kn, int m_batch, int Kplus1);
 template <bool ublm, typename count_t>
 __device__ __forceinline__ kagg_t getKc(const kagg_t *Kc_values, int batch_idx, int Kplus1);
 
+// One shared pseudo-random sequence is used for all X/D values in a batch.
+// D starts at sequence position 0, while X starts two sequence positions later.
+// Consequently, the D random stream is exactly the X random stream delayed by two cycles.
+#define RPU_BLM_LSFR_X_DELAY 2
+#define RPU_BLM_LSFR_D_DELAY 0
+
+// Maximal-length 32-bit Galois LFSR corresponding to
+// x^32 + x^22 + x^2 + x + 1.
+__device__ __forceinline__ uint32_t rpuBlmLfsrStep(uint32_t state) {
+  const uint32_t lsb = state & 1u;
+  state >>= 1;
+  state ^= (0u - lsb) & 0x80200003u;
+  return state;
+}
+
+__device__ __forceinline__ void rpuBlmLfsrAdvance(uint32_t &state, int cycles) {
+#pragma unroll
+  for (int i = 0; i < cycles; i++) {
+    state = rpuBlmLfsrStep(state);
+  }
+}
+
+__device__ __forceinline__ float rpuBlmLfsrUniform(uint32_t &state) {
+  state = rpuBlmLfsrStep(state);
+  // Keep the 24 most significant bits, matching the effective precision of float.
+  return static_cast<float>((state >> 8) + 1u) * 0x1.0p-24f;
+}
+
+// Generate one changing seed per batch. The seed states are advanced by a tiny
+// setup kernel once per makeCounts() call and are read-only in the count kernels.
+__device__ __forceinline__ uint32_t
+rpuBlmGetLfsrSeed(const curandState *random_states, int batch_idx) {
+  curandState local_state = random_states[batch_idx];
+  uint32_t lsfr = curand(&local_state);
+
+  // Decorrelate nearby CURAND states before using the value as an LFSR state.
+  lsfr ^= lsfr >> 16;
+  lsfr *= 0x7FEB352Du;
+  lsfr ^= lsfr >> 15;
+  lsfr *= 0x846CA68Bu;
+  lsfr ^= lsfr >> 16;
+
+  return lsfr == 0u ? 1u : lsfr;
+}
+
+__global__ void kernelAdvanceLfsrSeedStates(curandState *random_states, int n_states) {
+  const int tid = blockDim.x * blockIdx.x + threadIdx.x;
+  if (tid < n_states) {
+    curandState local_state = random_states[tid];
+    (void)curand(&local_state);
+    random_states[tid] = local_state;
+  }
+}
+
 template <typename count_t>
 __device__ __forceinline__ void getCountsSimpleLoop(
     float value,
@@ -200,7 +254,7 @@ __device__ __forceinline__ void getCountsSimpleLoop(
     count_t *c,
     int nK32m1,
     int K,
-    curandState &local_state,
+    uint32_t &local_state,
     int nK32,
     int sz,
     kagg_t Kc);
@@ -529,8 +583,8 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
 }
 
 
-#define GET_COUNTS_INNER_LOOP(SCALEPROB)                                                   \
-   /* STAGE 3.4 */                                                                                 \
+#define GET_COUNTS_INNER_LOOP(SCALEPROB, BATCH_IDX, LSFR_DELAY)                                   \
+  /* STAGE 3.4 */                                                                                  \
   negative = value < (T)0.0;                                                                       \
   value = (negative) ? -value : value;                                                             \
                                                                                                    \
@@ -542,12 +596,28 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
   }                                                                                                \
   value = __shfl_sync(0xFFFFFFFF, value, 0);                                                       \
                                                                                                    \
+  /*                                                                                               \
+   * Bit 0 of the first word stores the sign. Logical pulse 0 therefore starts                    \
+   * at lane 1. Lane 0 starts at logical pulse 31, which is the first pulse                         \
+   * of the second packed word.                                                                    \
+   */                                                                                              \
+  uint32_t lsfr =                                                                                 \
+      (laneId == 0) ? rpuBlmGetLfsrSeed(lsfr_states, BATCH_IDX) : 0u;                              \
+  lsfr = __shfl_sync(0xFFFFFFFF, lsfr, 0);                                                  \
+  const int lane_offset = (laneId == 0) ? 31 : laneId - 1;                                   \
+  rpuBlmLfsrAdvance(lsfr, (LSFR_DELAY) + lane_offset);                                       \
+                                                                                                   \
   int isize = 0;                                                                                   \
                                                                                                    \
   PRAGMA(unroll)                                                                                   \
   for (int i = 0; i < nK32; i++) {                                                                 \
+    const bool pulse_lane_valid = (i != 0) || (laneId != 0);                                      \
+    stoch_value = pulse_lane_valid ? rpuBlmLfsrUniform(lsfr) : (T)2.0;                            \
                                                                                                    \
-    stoch_value = curand_uniform(&local_state);                                                    \
+    /* Move this lane to the corresponding position in the next 32-bit word. */                    \
+    if (pulse_lane_valid && i + 1 < nK32) {                                                        \
+      rpuBlmLfsrAdvance(lsfr, 31);                                                                \
+    }                                                                                              \
                                                                                                    \
     ballot = __ballot_sync(0xFFFFFFFF, stoch_value < value);                                       \
                                                                                                    \
@@ -563,20 +633,19 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
       *(c + isize) = ballot;                                                                       \
       isize += sz;                                                                                 \
     }                                                                                              \
-  }                                                               \
+  }
 
-
-#define GET_COUNTS_LOOP(PROB, SIZE, COUNTS, SCALEPROB)                                             \
+#define GET_COUNTS_LOOP(PROB, SIZE, COUNTS, SCALEPROB, LSFR_DELAY)                                \
   sz = SIZE;                                                                                       \
-  /* STAGE 3.3 */                                                                                   \
+  /* STAGE 3.3 */                                                                                  \
   if (sourceId < sz) {                                                                             \
     value = PROB[sourceId];                                                                        \
     c = &COUNTS[sourceId];                                                                         \
                                                                                                    \
-    GET_COUNTS_INNER_LOOP(SCALEPROB);                                                              \
+    GET_COUNTS_INNER_LOOP(SCALEPROB, 0, LSFR_DELAY);                                               \
   }
 
-#define GET_COUNTS_LOOP_BATCH(PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SORTED)                      \
+#define GET_COUNTS_LOOP_BATCH(PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, LSFR_DELAY)         \
   {                                                                                                \
     sz = SIZE;                                                                                     \
     int counts_offset = nK32 * sz;                                                                 \
@@ -586,9 +655,10 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
       int sourceId = (tid + i_stride) >> 5;                                                        \
       if (sourceId < n) {                                                                          \
         value = PROB[sourceId];                                                                    \
+        const int batch_idx = getBatchIdx<TRANS>(sourceId, sz, m_batch);                           \
         c = &COUNTS[getCountsIdx<TRANS, OUTTRANS, uint32_t>(                                       \
             sourceId, sz, m_batch, counts_offset)];                                                \
-        GET_COUNTS_INNER_LOOP(SCALEPROB, SORTED);                                                          \
+        GET_COUNTS_INNER_LOOP(SCALEPROB, batch_idx, LSFR_DELAY);                                   \
       }                                                                                            \
     }                                                                                              \
   }
@@ -613,6 +683,7 @@ __global__ void kernelUpdateGetCountsBatch_Loop2(
     int Kplus1,
     int m_batch_in,
     curandState *random_states,
+    const curandState *lsfr_states,
     T resolution,
     bool sto_round) {
   // call << (size (of states)/numwarpsperblock,1),warpSize*numwarpsperblock >>
@@ -652,11 +723,13 @@ __global__ void kernelUpdateGetCountsBatch_Loop2(
     // NOTE: need to re-order in update from SIZE*nK32 format, when it is trans!
 
     // d input
-    GET_COUNTS_LOOP_BATCH(d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans);
+    GET_COUNTS_LOOP_BATCH(
+        d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans, RPU_BLM_LSFR_D_DELAY);
 
     // x input
     compute_noz_if = false;
-    GET_COUNTS_LOOP_BATCH(x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans);
+    GET_COUNTS_LOOP_BATCH(
+        x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, RPU_BLM_LSFR_X_DELAY);
 
     // save new random states
     random_states[tid] = local_state;
@@ -688,13 +761,16 @@ int debugKernelUpdateGetCountsBatch_Loop2(
       MIN((size * m_batch + n_items - 1) / n_items, numwarpsperblock * 8); // stripped per thread
   int nblocks = (m + numwarpsperblock - 1) / numwarpsperblock;
   int n = m * 32;
-  RPU_BLM_DEBUG_BATCH_INIT(n, uint32_t);
+  RPU_BLM_DEBUG_BATCH_INIT(n + m_batch, uint32_t);
+
+  kernelAdvanceLfsrSeedStates<<<1, 32, 0, c->getStream()>>>(
+      dev_states.getData(), m_batch);
 
   kernelUpdateGetCountsBatch_Loop2<T, false, false, false>
       <<<nblocks, nthreads, 0, c->getStream()>>>(
           dev_indata.getData(), size, scaleprob, dev_counts.getData(), dev_indata2.getData(), size,
           scaleprob, dev_counts2.getData(), dev_d_noz.getData(), Kplus1, m_batch,
-          dev_states.getData(), resolution, sto_round);
+          dev_states.getData() + m_batch, dev_states.getData(), resolution, sto_round);
 
   RPU_BLM_DEBUG_BATCH_FINISH(uint32_t);
   return 0;
@@ -934,7 +1010,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
     uint32_t *c,
     int nK32m1,
     int K,
-    curandState &local_state,
+    uint32_t &local_state,
     int nK32,
     int sz,
     kagg_t Kc) {
@@ -944,7 +1020,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
   int nn = (nK32m1_local > 0) ? 31 : K;
   PRAGMA(unroll)
   for (int j = 1; j <= nn; j++) {
-    float stoch_value = curand_uniform(&local_state);
+    float stoch_value = rpuBlmLfsrUniform(local_state);
     ballot |= (stoch_value < value) ? (((uint32_t)1) << j) : (uint32_t)0;
   }
   *c = ballot;
@@ -961,7 +1037,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
         nn = (i == nK32m1_local) ? (K & 0x1f) : 31;
         PRAGMA(unroll)
         for (int j = 0; j <= nn; j++) {
-          float stoch_value = curand_uniform(&local_state);
+          float stoch_value = rpuBlmLfsrUniform(local_state);
           ballot |= (stoch_value < value) ? (((uint32_t)1) << j) : (uint32_t)0;
         }
         *(c + offset) = ballot;
@@ -977,7 +1053,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
     uint64_t *c,
     int nK32m1,
     int K,
-    curandState &local_state,
+    uint32_t &local_state,
     int nK32,
     int sz,
     kagg_t Kc) {
@@ -992,7 +1068,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
 
   PRAGMA(unroll)
   for (int j = 0; j < K; j++) { // start from zero (no negative bit)
-    float stoch_value = curand_uniform(&local_state);
+    float stoch_value = rpuBlmLfsrUniform(local_state);
     ballot |= (stoch_value < value) ? (((uint32_t)1) << j) : (uint32_t)0;
   }
 
@@ -1010,20 +1086,19 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
 }
 
 #define GET_COUNTS_SIMPLE_LOOP_BATCH(                                                              \
-    PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SPROPOP, TIDSTART, TIDEND, TIDN)               \
+    PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SPROPOP, TIDSTART, TIDEND, TIDN, LSFR_DELAY)  \
   {                                                                                                \
-      /*STAGE 3.3 BATCH*/                                                                          \
+    /* STAGE 3.3 BATCH */                                                                          \
     if ((tid >= TIDSTART) && (tid < TIDEND)) {                                                     \
       int sz = SIZE;                                                                               \
       int counts_offset = nK32 * sz;                                                               \
       int n = m_batch * sz;                                                                        \
                                                                                                    \
-      for (int i_stride = 0; i_stride < n; i_stride += TIDN) {                                     \
-                                                                                                   \
+      for (int i_stride = 0; i_stride < n; i_stride += TIDN) {                                    \
         int idx = (tid - TIDSTART + i_stride);                                                     \
         if (idx < n) {                                                                             \
           T value = PROB[idx];                                                                     \
-          int batch_idx = getBatchIdx<TRANS>(idx, sz, m_batch);                                    \
+          int batch_idx = getBatchIdx<TRANS>(idx, sz, m_batch);                                   \
           int K = getK<update_bl_management>(K_values, batch_idx, Kplus1);                         \
           if ((K == 0) || (value == (T)0.0)) {                                                     \
             NUMBER_OF_ZEROS_COMPUTE;                                                               \
@@ -1043,7 +1118,12 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
           kagg_t Kc = getKc<update_bl_management, count_t>(Kc_values, batch_idx, Kplus1);          \
           count_t *c = &COUNTS[getCountsIdx<TRANS, OUTTRANS, count_t>(                             \
               idx, sz, m_batch, counts_offset, K, Kc, nB)];                                        \
-          getCountsSimpleLoop<count_t>(value, negative, c, nK32m1, K, local_state, nK32, sz, Kc);  \
+                                                                                                   \
+          /* All values in this batch replay the same LFSR sequence. */                            \
+          uint32_t lsfr = rpuBlmGetLfsrSeed(lsfr_states, batch_idx);                                  \
+          rpuBlmLfsrAdvance(lsfr, LSFR_DELAY);                                                         \
+          getCountsSimpleLoop<count_t>(                                                            \
+              value, negative, c, nK32m1, K, lsfr, nK32, sz, Kc);                                        \
         }                                                                                          \
       }                                                                                            \
     }                                                                                              \
@@ -1072,6 +1152,7 @@ __global__ void kernelUpdateGetCountsBatch_SimpleLoop2(
     int Kplus1_in,
     int m_batch_in,
     curandState *random_states,
+    const curandState *lsfr_states,
     T resolution,
     bool sto_round,
     const T *scale_values = nullptr,
@@ -1087,7 +1168,7 @@ __global__ void kernelUpdateGetCountsBatch_SimpleLoop2(
   // -- for UM: scale values should be sqrt(amax_x/amax_d) for D
   // -- for UM: scale values has to be strictly POSITIVE (NON-zero)!!
   // -- ASSUMES: NGRID>1 !! (nblocks>1)
-  // -- RANDOMSTATES need to have 1 for each tid.
+  // -- worker RANDOMSTATES need one state per tid; LFSR seed states need one per batch.
   // -- CAUTION: counts should be set to zero!!!
   //
   // In the case of uint64_t:
@@ -1134,12 +1215,13 @@ __global__ void kernelUpdateGetCountsBatch_SimpleLoop2(
     // d input
     GET_COUNTS_SIMPLE_LOOP_BATCH(
         d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans, *, tid_nx, tid_nx + tid_nd,
-        tid_nd);
+        tid_nd, RPU_BLM_LSFR_D_DELAY);
 
     // x input
     compute_noz_if = false;
     GET_COUNTS_SIMPLE_LOOP_BATCH(
-        x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, /, 0, tid_nx, tid_nx);
+        x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, /, 0, tid_nx, tid_nx,
+        RPU_BLM_LSFR_X_DELAY);
 
     // save new random states
     random_states[tid] = local_state;
@@ -1169,13 +1251,16 @@ int debugKernelUpdateGetCountsBatch_SimpleLoop2(
   int nblocks = MAX((m + nthreads - 1) / nthreads, 2);
   std::cout << "nblocks, nthreads: " << nblocks << ", " << nthreads << std::endl;
   int n = m;
-  RPU_BLM_DEBUG_BATCH_INIT(n, uint32_t);
+  RPU_BLM_DEBUG_BATCH_INIT(n + m_batch, uint32_t);
+
+  kernelAdvanceLfsrSeedStates<<<1, 32, 0, c->getStream()>>>(
+      dev_states.getData(), m_batch);
 
   kernelUpdateGetCountsBatch_SimpleLoop2<T, false, false, false, false, false>
       <<<nblocks, nthreads, 0, c->getStream()>>>(
           dev_indata.getData(), size, scaleprob, dev_counts.getData(), dev_indata2.getData(), size,
           scaleprob, dev_counts2.getData(), dev_d_noz.getData(), Kplus1, m_batch,
-          dev_states.getData(), resolution, sto_round);
+          dev_states.getData() + m_batch, dev_states.getData(), resolution, sto_round);
 
   RPU_BLM_DEBUG_BATCH_FINISH(uint32_t);
   return 0;
@@ -1208,6 +1293,7 @@ __global__ void kernelUpdateGetCounts_Loop2(
     uint32_t *d_noz,
     int Kplus1,
     curandState *random_states,
+    const curandState *lsfr_states,
     T resolution,
     bool sto_round) {
 
@@ -1251,12 +1337,12 @@ __global__ void kernelUpdateGetCounts_Loop2(
     int sz;
 
     // d input: use the value delayed by two cycles
-    GET_COUNTS_LOOP(d_prob,d_size,d_counts,d_scaleprob);
+    GET_COUNTS_LOOP(d_prob, d_size, d_counts, d_scaleprob, RPU_BLM_LSFR_D_DELAY);
 
     // x input: use the current value
     compute_noz_if = false;
 
-    GET_COUNTS_LOOP(x_prob,x_size,x_counts,x_scaleprob);
+    GET_COUNTS_LOOP(x_prob, x_size, x_counts, x_scaleprob, RPU_BLM_LSFR_X_DELAY);
 
     // Save the advanced random state.
     random_states[tid] = local_state;
@@ -1287,12 +1373,14 @@ int debugKernelUpdateGetCounts_Loop2(
 
   int n = size * 32;
 
-  RPU_BLM_DEBUG_INIT(n);
+  RPU_BLM_DEBUG_INIT(n + 1);
+
+  kernelAdvanceLfsrSeedStates<<<1, 32, 0, c->getStream()>>>(dev_states.getData(), 1);
 
   kernelUpdateGetCounts_Loop2<<<nblocks, nthreads, 0, c->getStream()>>>(
       dev_indata.getData(), 0, scaleprob, dev_counts.getData(), dev_indata.getData(), size,
-      scaleprob, dev_counts.getData(), dev_d_noz.getData(), Kplus1, dev_states.getData(),
-      resolution, sto_round);
+      scaleprob, dev_counts.getData(), dev_d_noz.getData(), Kplus1, dev_states.getData() + 1,
+      dev_states.getData(), resolution, sto_round);
 
   RPU_BLM_DEBUG_FINISH;
   return 0;
@@ -2177,9 +2265,15 @@ void BitLineMaker<T>::makeCounts(
         // one block  is a little bit faster than TWOBLOCKS
         int nblocks = context_->getNBlocks(MAX(d_size_, x_size_) * 32, nthreads_);
 
+        const int n_random_states = nthreads_ * nblocks;
+        curandState *random_states = context_->getRandomStates(n_random_states + 1);
+        curandState *lsfr_states = random_states;
+        random_states += 1;
+        kernelAdvanceLfsrSeedStates<<<1, 32, 0, s>>>(lsfr_states, 1);
+
         kernelUpdateGetCounts_Loop2<<<nblocks, nthreads_, 0, s>>>(
             x_in, x_size_, B, dev_x_counts_->getData(), d_in, d_size_, A, dev_d_counts_->getData(),
-            dev_d_noz, Kplus1, context_->getRandomStates(nthreads_ * nblocks), res, sr);
+            dev_d_noz, Kplus1, random_states, lsfr_states, res, sr);
 
       } else {
         // fast path for smaller K values (needs to be K<=32! and (K + 1) % 2 == 0)
@@ -2201,6 +2295,18 @@ void BitLineMaker<T>::makeCounts(
         int nblocks = context_->getNBlocks(m, nthreads_);
         nblocks = MAX(MIN(max_block_count_, nblocks), 2);
 
+        const int n_lsfr_states = MAX(m_batch, 1);
+        const int n_random_states = nthreads_ * nblocks;
+        curandState *random_states =
+            context_->getRandomStates(n_lsfr_states + n_random_states);
+        curandState *lsfr_states = random_states;
+        random_states += n_lsfr_states;
+
+        const int seed_threads = MIN(nthreads_, 256);
+        const int seed_blocks = (n_lsfr_states + seed_threads - 1) / seed_threads;
+        kernelAdvanceLfsrSeedStates<<<seed_blocks, seed_threads, 0, s>>>(
+            lsfr_states, n_lsfr_states);
+
         if (use_bo64 == 1) {
 
           // need to set buffers to zero
@@ -2213,13 +2319,13 @@ void BitLineMaker<T>::makeCounts(
             Kc_values = umh_->getKcValueData();
             Kn = umh_->getKnData(current_ublm_, m_batch);
           }
-          auto *random_states = context_->getRandomStates(nthreads_ * nblocks);
           RPU_BLM_SWITCH_TRANS_TEMPLATE_UM(
               x_trans, d_trans, out_trans, current_um_, current_ublm_,
               kernelUpdateGetCountsBatch_SimpleLoop2,
               (x_in, x_size_, B, dev_x_counts_bo64_->getData(), d_in, d_size_, A,
-               dev_d_counts_bo64_->getData(), dev_d_noz, current_BL_ + 1, m_batch, random_states,
-               res, sr, scale_values, K_values, lr / weight_granularity, Kc_values, Kn));
+               dev_d_counts_bo64_->getData(), dev_d_noz, current_BL_ + 1, m_batch,
+               random_states, lsfr_states, res, sr, scale_values, K_values,
+               lr / weight_granularity, Kc_values, Kn));
         } else {
 
           // need to set buffers to zero for zero short-cut
@@ -2231,7 +2337,7 @@ void BitLineMaker<T>::makeCounts(
               kernelUpdateGetCountsBatch_SimpleLoop2,
               (x_in, x_size_, B, dev_x_counts_->getData(), d_in, d_size_, A,
                dev_d_counts_->getData(), dev_d_noz, current_BL_ + 1, m_batch,
-               context_->getRandomStates(nthreads_ * nblocks), res, sr, scale_values, K_values,
+               random_states, lsfr_states, res, sr, scale_values, K_values,
                lr / weight_granularity));
         }
       } else {
@@ -2239,10 +2345,21 @@ void BitLineMaker<T>::makeCounts(
         int nblocks = context_->getNBlocks(m, nthreads_);
         nblocks = MIN(max_block_count_, nblocks);
 
+        const int n_lsfr_states = MAX(m_batch, 1);
+        const int n_random_states = nthreads_ * nblocks;
+        curandState *random_states =
+            context_->getRandomStates(n_lsfr_states + n_random_states);
+        curandState *lsfr_states = random_states;
+        random_states += n_lsfr_states;
+        const int seed_threads = MIN(nthreads_, 256);
+        const int seed_blocks = (n_lsfr_states + seed_threads - 1) / seed_threads;
+        kernelAdvanceLfsrSeedStates<<<seed_blocks, seed_threads, 0, s>>>(
+            lsfr_states, n_lsfr_states);
+
         RPU_BLM_SWITCH_TRANS_TEMPLATE(
             x_trans, d_trans, out_trans, kernelUpdateGetCountsBatch_Loop2,
             (x_in, x_size_, B, dev_x_counts_->getData(), d_in, d_size_, A, dev_d_counts_->getData(),
-             dev_d_noz, current_BL_ + 1, m_batch, context_->getRandomStates(nthreads_ * nblocks),
+             dev_d_noz, current_BL_ + 1, m_batch, random_states, lsfr_states,
              res, sr), );
       }
     }
@@ -2477,6 +2594,8 @@ RPU_BLM_ITER_TEMPLATE(half_t, const half_t *, EyeInputIterator<half_t>);
 #undef RPU_BLM_BL_TO_SELECT_SIMPLE_LOOP
 #undef LASTK32MASK
 #undef RPU_BLM_DEFINE_NK32
+#undef RPU_BLM_LSFR_X_DELAY
+#undef RPU_BLM_LSFR_D_DELAY
 #undef RPU_BLM_DEFINE_NK32_BATCH
 #undef COMMA
 #undef RPU_BLM_DEBUG_INIT
