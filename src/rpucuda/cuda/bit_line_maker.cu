@@ -203,9 +203,8 @@ __device__ __forceinline__ void getCountsSimpleLoop(
     curandState &local_state,
     int nK32,
     int sz,
-    kagg_t Kc,
-    bool sorted);
-
+    kagg_t Kc);
+/*STAGE 3.4 BATCH*/
 #define DISCRETIZE_VALUE_STOCH_DEFINITIONS                                                         \
   T res = resolution;                                                                              \
   bool sr = sto_round & (res > (T)0.0);                                                            \
@@ -529,217 +528,52 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
   }
 }
 
-/* Swap two logical pulse positions without touching the sign bit. */
-__device__ __forceinline__ void swap_repeated_group_pulse_positions(
-    uint32_t *c,
-    int sz,
-    int logical_i,
-    int logical_j) {
-  if (logical_i == logical_j) {
-    return;
-  }
 
-  int word_i;
-  int bit_i;
-  int word_j;
-  int bit_j;
-
-  if (logical_i < 31) {
-    word_i = 0;
-    bit_i = logical_i + 1;
-  } else {
-    const int packed_i = logical_i - 31;
-    word_i = 1 + (packed_i >> 5);
-    bit_i = packed_i & 31;
-  }
-
-  if (logical_j < 31) {
-    word_j = 0;
-    bit_j = logical_j + 1;
-  } else {
-    const int packed_j = logical_j - 31;
-    word_j = 1 + (packed_j >> 5);
-    bit_j = packed_j & 31;
-  }
-
-  uint32_t *address_i = c + word_i * sz;
-  uint32_t *address_j = c + word_j * sz;
-
-  const uint32_t mask_i = (uint32_t)1u << bit_i;
-  const uint32_t mask_j = (uint32_t)1u << bit_j;
-
-  if (word_i == word_j) {
-    const uint32_t word = *address_i;
-    const bool value_i = (word & mask_i) != 0u;
-    const bool value_j = (word & mask_j) != 0u;
-
-    if (value_i != value_j) {
-      *address_i = word ^ mask_i ^ mask_j;
-    }
-  } else {
-    const uint32_t value_i = *address_i;
-    const uint32_t value_j = *address_j;
-    const bool bit_value_i = (value_i & mask_i) != 0u;
-    const bool bit_value_j = (value_j & mask_j) != 0u;
-
-    if (bit_value_i != bit_value_j) {
-      *address_i = value_i ^ mask_i;
-      *address_j = value_j ^ mask_j;
-    }
-  }
-}
+#define GET_COUNTS_INNER_LOOP(SCALEPROB)                                                   \
+   /* STAGE 3.4 */                                                                                 \
+  negative = value < (T)0.0;                                                                       \
+  value = (negative) ? -value : value;                                                             \
+                                                                                                   \
+  value *= SCALEPROB;                                                                              \
+                                                                                                   \
+  if (laneId == 0) {                                                                               \
+    DISCRETIZE_VALUE_STOCH(local_state);                                                           \
+    NUMBER_OF_ZEROS_COMPUTE;                                                                       \
+  }                                                                                                \
+  value = __shfl_sync(0xFFFFFFFF, value, 0);                                                       \
+                                                                                                   \
+  int isize = 0;                                                                                   \
+                                                                                                   \
+  PRAGMA(unroll)                                                                                   \
+  for (int i = 0; i < nK32; i++) {                                                                 \
+                                                                                                   \
+    stoch_value = curand_uniform(&local_state);                                                    \
+                                                                                                   \
+    ballot = __ballot_sync(0xFFFFFFFF, stoch_value < value);                                       \
+                                                                                                   \
+    if (laneId == 0) {                                                                             \
+      if (i == 0) {                                                                                \
+        ballot = (negative) ? (ballot | one) : (ballot & ~one);                                    \
+      }                                                                                            \
+                                                                                                   \
+      if (i == nK32m1) {                                                                           \
+        ballot = ballot & lastK32mask;                                                             \
+      }                                                                                            \
+                                                                                                   \
+      *(c + isize) = ballot;                                                                       \
+      isize += sz;                                                                                 \
+    }                                                                                              \
+  }                                                               \
 
 
-
-#define GET_COUNTS_INNER_LOOP(SCALEPROB, SORTED)                                      \
-    /* STAGE 3.4 */                                                                     \
-    __shared__ uint32_t shared_group_permutation_seed;                                 \
-                                                                                       \
-    negative = value < (T)0.0;                                                         \
-    value = negative ? -value : value;                                                 \
-    value *= SCALEPROB;                                                                \
-                                                                                       \
-    if (laneId == 0) {                                                                 \
-      DISCRETIZE_VALUE_STOCH(local_state);                                              \
-      NUMBER_OF_ZEROS_COMPUTE;                                                         \
-    }                                                                                  \
-                                                                                       \
-    value = __shfl_sync(0xFFFFFFFF, value, 0);                                          \
-                                                                                       \
-    int isize = 0;                                                                     \
-    int pulse_count = 0;                                                               \
-    int pulse_length = 0;                                                              \
-                                                                                       \
-    /* Generate the stochastic train. For SORTED, retain only its count. */             \
-    PRAGMA(unroll)                                                                     \
-    for (int i = 0; i < nK32; i++) {                                                   \
-      stoch_value = curand_uniform(&local_state);                                       \
-                                                                                       \
-      ballot = __ballot_sync(                                                          \
-          0xFFFFFFFF,                                                                  \
-          stoch_value < value);                                                        \
-                                                                                       \
-      if (laneId == 0) {                                                               \
-        if (i == 0) {                                                                  \
-          ballot = negative                                                            \
-                       ? (ballot | (uint32_t)one)                                       \
-                       : (ballot & ~((uint32_t)one));                                   \
-        }                                                                              \
-                                                                                       \
-        if (i == nK32m1) {                                                             \
-          ballot &= (uint32_t)lastK32mask;                                             \
-        }                                                                              \
-                                                                                       \
-        if (SORTED) {                                                                  \
-          uint32_t pulse_ballot = ballot;                                               \
-          if (i == 0) {                                                                \
-            pulse_ballot &= ~((uint32_t)one);                                           \
-          }                                                                            \
-          pulse_count += __popc(pulse_ballot);                                          \
-        } else {                                                                       \
-          *(c + isize) = ballot;                                                       \
-        }                                                                              \
-                                                                                       \
-        isize += sz;                                                                   \
-      }                                                                                \
-    }                                                                                  \
-                                                                                       \
-    /* Build the repeated-group burst pattern from the population count. */             \
-    if (SORTED && laneId == 0) {                                                       \
-      isize = 0;                                                                       \
-                                                                                       \
-      /* Clear the train, retain sign, and determine the usable BL. */                  \
-      PRAGMA(unroll)                                                                   \
-      for (int i = 0; i < nK32; i++) {                                                 \
-        uint32_t valid_mask = 0xFFFFFFFFu;                                              \
-        if (i == nK32m1) {                                                             \
-          valid_mask &= (uint32_t)lastK32mask;                                         \
-        }                                                                              \
-        if (i == 0) {                                                                  \
-          valid_mask &= ~((uint32_t)one);                                               \
-        }                                                                              \
-                                                                                       \
-        pulse_length += __popc(valid_mask);                                             \
-        *(c + isize) = ((i == 0) && negative) ? (uint32_t)one : 0u;                    \
-        isize += sz;                                                                   \
-      }                                                                                \
-                                                                                       \
-      if (pulse_length > 0) {                                                          \
-        const int group_count =                                                        \
-            32 - __clz((uint32_t)pulse_length);                                         \
-        int group_sizes[32];                                                           \
-        int total = pulse_length;                                                       \
-                                                                                       \
-        /* Recursive halving: BL=5 -> (1,1,3), BL=10 -> (1,1,3,5). */                  \
-        for (int group_i = group_count - 1; group_i > 0; group_i--) {                  \
-          const int preceding_sum = total >> 1;                                        \
-          group_sizes[group_i] = total - preceding_sum;                                \
-          total = preceding_sum;                                                       \
-        }                                                                              \
-        group_sizes[0] = total;                                                        \
-                                                                                       \
-        /* Select the largest complete groups whose sum is pulse_count. */              \
-        uint32_t active_groups = 0u;                                                    \
-        int remaining_pulses = pulse_count;                                             \
-        for (int group_i = group_count - 1; group_i >= 0; group_i--) {                 \
-          const int group_size = group_sizes[group_i];                                  \
-          if (group_size <= remaining_pulses) {                                         \
-            active_groups |= ((uint32_t)1u << group_i);                                 \
-            remaining_pulses -= group_size;                                             \
-          }                                                                            \
-        }                                                                              \
-                                                                                       \
-        /* Write selected groups contiguously: A...A B...B C...C. */                    \
-        int group_start = 0;                                                           \
-        for (int group_i = 0; group_i < group_count; group_i++) {                      \
-          const int group_size = group_sizes[group_i];                                  \
-          if ((active_groups & ((uint32_t)1u << group_i)) != 0u) {                     \
-            set_repeated_group_burst_range(                                             \
-                c, sz, group_start, group_size);                                        \
-          }                                                                            \
-          group_start += group_size;                                                    \
-        }                                                                              \
-      }                                                                                \
-    }                                                                                  \
-                                                                                       \
-    if (SORTED) {                                                                      \
-      /* All trains must finish burst construction before permutation. */               \
-      __syncthreads();                                                                 \
-                                                                                       \
-      /* One random seed creates one common permutation for the CUDA block. */          \
-      if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {                  \
-        shared_group_permutation_seed = curand(&local_state) | 1u;                     \
-      }                                                                                \
-                                                                                       \
-      __syncthreads();                                                                 \
-                                                                                       \
-      if (laneId == 0) {                                                               \
-        uint32_t permutation_state = shared_group_permutation_seed;                     \
-                                                                                       \
-        /* Fisher-Yates over logical pulse positions; bit 0 (sign) is excluded. */      \
-        for (int pulse_i = pulse_length - 1; pulse_i > 0; pulse_i--) {                 \
-          permutation_state ^= permutation_state << 13;                                \
-          permutation_state ^= permutation_state >> 17;                                \
-          permutation_state ^= permutation_state << 5;                                 \
-                                                                                       \
-          const int pulse_j = (int)(                                                   \
-              ((uint64_t)permutation_state * (uint64_t)(pulse_i + 1)) >> 32);          \
-                                                                                       \
-          swap_repeated_group_pulse_positions(c, sz, pulse_i, pulse_j);                \
-        }                                                                              \
-      }                                                                                \
-                                                                                       \
-      __syncthreads();                                                                 \
-    }
-
-#define GET_COUNTS_LOOP(PROB, SIZE, COUNTS, SCALEPROB, SORTED)                                             \
+#define GET_COUNTS_LOOP(PROB, SIZE, COUNTS, SCALEPROB)                                             \
   sz = SIZE;                                                                                       \
   /* STAGE 3.3 */                                                                                   \
   if (sourceId < sz) {                                                                             \
     value = PROB[sourceId];                                                                        \
     c = &COUNTS[sourceId];                                                                         \
                                                                                                    \
-    GET_COUNTS_INNER_LOOP(SCALEPROB, SORTED);                                                              \
+    GET_COUNTS_INNER_LOOP(SCALEPROB);                                                              \
   }
 
 #define GET_COUNTS_LOOP_BATCH(PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SORTED)                      \
@@ -818,11 +652,11 @@ __global__ void kernelUpdateGetCountsBatch_Loop2(
     // NOTE: need to re-order in update from SIZE*nK32 format, when it is trans!
 
     // d input
-    GET_COUNTS_LOOP_BATCH(d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans, false);
+    GET_COUNTS_LOOP_BATCH(d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans);
 
     // x input
     compute_noz_if = false;
-    GET_COUNTS_LOOP_BATCH(x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, true);
+    GET_COUNTS_LOOP_BATCH(x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans);
 
     // save new random states
     random_states[tid] = local_state;
@@ -1103,179 +937,36 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
     curandState &local_state,
     int nK32,
     int sz,
-    kagg_t Kc,
-    bool sorted) {
-  /* STAGE 3.4 BATCH */
+    kagg_t Kc) {
 
-  /* Shared so every train in this CUDA block applies the same permutation. */
-  __shared__ uint32_t shared_group_permutation_seed;
-
-  uint32_t ballot =
-      negative ? (uint32_t)1u : (uint32_t)0u;
-
-  int pulse_count = 0;
-
-  const int nK32m1_local =
-      MIN(K >> 5, nK32m1);
-
-  int nn =
-      (nK32m1_local > 0) ? 31 : K;
-
-  /* Generate the stochastic train. For sorted=true, retain only its count. */
+  uint32_t ballot = (negative) ? 1 : 0;
+  int nK32m1_local = MIN(K >> 5, nK32m1);
+  int nn = (nK32m1_local > 0) ? 31 : K;
   PRAGMA(unroll)
   for (int j = 1; j <= nn; j++) {
-    const float stoch_value =
-        curand_uniform(&local_state);
-    const bool pulse =
-        stoch_value < value;
-
-    if (sorted) {
-      pulse_count += pulse ? 1 : 0;
-    } else if (pulse) {
-      ballot |= (uint32_t)1u << j;
-    }
+    float stoch_value = curand_uniform(&local_state);
+    ballot |= (stoch_value < value) ? (((uint32_t)1) << j) : (uint32_t)0;
   }
-
-  if (!sorted) {
-    *c = ballot;
-  }
-
-  /* Remaining packed words. */
+  *c = ballot;
   if (nK32 > 1) {
+    ballot = 0;
     int offset = 0;
-
     PRAGMA(unroll)
     for (int i = 1; i < nK32; i++) {
       offset += sz;
-
       if (i > nK32m1_local) {
-        if (!sorted) {
-          *(c + offset) = 0u;
-        }
+        *(c + offset) = 0;
       } else {
-        ballot = 0u;
-        nn = (i == nK32m1_local)
-                 ? (K & 0x1f)
-                 : 31;
-
+        ballot = 0;
+        nn = (i == nK32m1_local) ? (K & 0x1f) : 31;
         PRAGMA(unroll)
         for (int j = 0; j <= nn; j++) {
-          const float stoch_value =
-              curand_uniform(&local_state);
-          const bool pulse =
-              stoch_value < value;
-
-          if (sorted) {
-            pulse_count += pulse ? 1 : 0;
-          } else if (pulse) {
-            ballot |= (uint32_t)1u << j;
-          }
+          float stoch_value = curand_uniform(&local_state);
+          ballot |= (stoch_value < value) ? (((uint32_t)1) << j) : (uint32_t)0;
         }
-
-        if (!sorted) {
-          *(c + offset) = ballot;
-        }
+        *(c + offset) = ballot;
       }
     }
-  }
-
-  if (sorted) {
-    /* Clear every word and retain only the sign bit. */
-    int offset = 0;
-
-    PRAGMA(unroll)
-    for (int i = 0; i < nK32; i++) {
-      *(c + offset) =
-          ((i == 0) && negative)
-              ? (uint32_t)1u
-              : 0u;
-      offset += sz;
-    }
-
-    if (K > 0) {
-      const int group_count =
-          32 - __clz((uint32_t)K);
-      int group_sizes[32];
-      int total = K;
-
-      /* Recursive halving: K=5 -> (1,1,3), K=10 -> (1,1,3,5). */
-      for (int group_i = group_count - 1;
-           group_i > 0;
-           group_i--) {
-        const int preceding_sum = total >> 1;
-        group_sizes[group_i] = total - preceding_sum;
-        total = preceding_sum;
-      }
-      group_sizes[0] = total;
-
-      /* Select the largest complete groups summing to pulse_count. */
-      uint32_t active_groups = 0u;
-      int remaining_pulses = pulse_count;
-
-      for (int group_i = group_count - 1;
-           group_i >= 0;
-           group_i--) {
-        const int group_size = group_sizes[group_i];
-
-        if (group_size <= remaining_pulses) {
-          active_groups |= ((uint32_t)1u << group_i);
-          remaining_pulses -= group_size;
-        }
-      }
-
-      /* Write the selected repeated groups as contiguous bursts. */
-      int group_start = 0;
-
-      for (int group_i = 0;
-           group_i < group_count;
-           group_i++) {
-        const int group_size = group_sizes[group_i];
-
-        if ((active_groups & ((uint32_t)1u << group_i)) != 0u) {
-          set_repeated_group_burst_range(
-              c,
-              sz,
-              group_start,
-              group_size);
-        }
-
-        group_start += group_size;
-      }
-    }
-
-    /* All trains must finish burst construction before permutation. */
-    __syncthreads();
-
-    /* Draw one seed for one common block-wide BL permutation. */
-    if (threadIdx.x == 0 &&
-        threadIdx.y == 0 &&
-        threadIdx.z == 0) {
-      shared_group_permutation_seed =
-          curand(&local_state) | 1u;
-    }
-
-    __syncthreads();
-
-    uint32_t permutation_state =
-        shared_group_permutation_seed;
-
-    /* Fisher-Yates over the K logical pulse bits; the sign bit is excluded. */
-    for (int pulse_i = K - 1; pulse_i > 0; pulse_i--) {
-      permutation_state ^= permutation_state << 13;
-      permutation_state ^= permutation_state >> 17;
-      permutation_state ^= permutation_state << 5;
-
-      const int pulse_j = (int)(
-          ((uint64_t)permutation_state * (uint64_t)(pulse_i + 1)) >> 32);
-
-      swap_repeated_group_pulse_positions(
-          c,
-          sz,
-          pulse_i,
-          pulse_j);
-    }
-
-    __syncthreads();
   }
 }
 
@@ -1289,8 +980,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
     curandState &local_state,
     int nK32,
     int sz,
-    kagg_t Kc,
-    bool sorted) {
+    kagg_t Kc) {
   static_assert(sizeof(uint64_t) == sizeof(unsigned long long int), "uint64 issue");
 
   // nK32m1 NEEDS TO BE 0 (otherwise not supported)
@@ -1320,7 +1010,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
 }
 
 #define GET_COUNTS_SIMPLE_LOOP_BATCH(                                                              \
-    PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SPROPOP, TIDSTART, TIDEND, TIDN, SORTED)               \
+    PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SPROPOP, TIDSTART, TIDEND, TIDN)               \
   {                                                                                                \
       /*STAGE 3.3 BATCH*/                                                                          \
     if ((tid >= TIDSTART) && (tid < TIDEND)) {                                                     \
@@ -1353,7 +1043,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
           kagg_t Kc = getKc<update_bl_management, count_t>(Kc_values, batch_idx, Kplus1);          \
           count_t *c = &COUNTS[getCountsIdx<TRANS, OUTTRANS, count_t>(                             \
               idx, sz, m_batch, counts_offset, K, Kc, nB)];                                        \
-          getCountsSimpleLoop<count_t>(value, negative, c, nK32m1, K, local_state, nK32, sz, Kc, SORTED);  \
+          getCountsSimpleLoop<count_t>(value, negative, c, nK32m1, K, local_state, nK32, sz, Kc);  \
         }                                                                                          \
       }                                                                                            \
     }                                                                                              \
@@ -1444,12 +1134,12 @@ __global__ void kernelUpdateGetCountsBatch_SimpleLoop2(
     // d input
     GET_COUNTS_SIMPLE_LOOP_BATCH(
         d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans, *, tid_nx, tid_nx + tid_nd,
-        tid_nd, false);
+        tid_nd);
 
     // x input
     compute_noz_if = false;
     GET_COUNTS_SIMPLE_LOOP_BATCH(
-        x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, /, 0, tid_nx, tid_nx, true);
+        x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, /, 0, tid_nx, tid_nx);
 
     // save new random states
     random_states[tid] = local_state;
@@ -1520,16 +1210,20 @@ __global__ void kernelUpdateGetCounts_Loop2(
     curandState *random_states,
     T resolution,
     bool sto_round) {
+
   // call << (size/numwarpsperblock,1),warpSize*numwarpsperblock >>
 
   // -- let each warp compute 32 K values
-  // -- no limit for K , however BLocked design might be better for larger K
+  // -- no limit for K, however blocked design might be better for larger K
   // STAGE 3.2
+
   volatile int tid = blockDim.x * blockIdx.x + threadIdx.x;
+
   const int x_size = x_size_in;
   const int d_size = d_size_in;
 
-  const int max_size = ((x_size > d_size) ? x_size : d_size) << 5;
+  const int max_size =
+      ((x_size > d_size) ? x_size : d_size) << 5;
 
   NUMBER_OF_ZEROS_INIT(d_noz);
 
@@ -1537,12 +1231,15 @@ __global__ void kernelUpdateGetCounts_Loop2(
     curandState local_state = random_states[tid];
 
     RPU_BLM_DEFINE_NK32;
+
     const uint32_t one = 1;
     const uint32_t lastK32mask = LASTK32MASK;
 
     const int laneId = threadIdx.x & 0x1f;
-    // const uint32_t sourceId =  blockIdx.x*warps_per_block + warpId;
-    const int sourceId = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+
+    const int sourceId =
+        blockIdx.x * (blockDim.x >> 5) +
+        (threadIdx.x >> 5);
 
     DISCRETIZE_VALUE_STOCH_DEFINITIONS;
 
@@ -1553,20 +1250,22 @@ __global__ void kernelUpdateGetCounts_Loop2(
     bool negative;
     int sz;
 
-    // d input
-    GET_COUNTS_LOOP(d_prob, d_size, d_counts, d_scaleprob, false);
+    // d input: use the value delayed by two cycles
+    GET_COUNTS_LOOP(d_prob,d_size,d_counts,d_scaleprob);
 
-    // x input
+    // x input: use the current value
     compute_noz_if = false;
-    GET_COUNTS_LOOP(x_prob, x_size, x_counts, x_scaleprob, true);
 
-    // save new random states
+    GET_COUNTS_LOOP(x_prob,x_size,x_counts,x_scaleprob);
+
+    // Save the advanced random state.
     random_states[tid] = local_state;
   }
 
-  NUMBER_OF_ZEROS_FINALIZE(d_noz, threadIdx.x == 0);
+  NUMBER_OF_ZEROS_FINALIZE(
+      d_noz,
+      threadIdx.x == 0);
 }
-
 namespace test_helper {
 template <typename T>
 int debugKernelUpdateGetCounts_Loop2(
