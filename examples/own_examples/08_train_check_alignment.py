@@ -4,6 +4,10 @@ import numpy as np
 
 
 BITS_PER_GROUP = 8
+MAX_BATCHES_TO_PRINT = 5
+
+EXPECT_X_LEFT_ALIGNED = False
+EXPECT_D_LEFT_ALIGNED = True
 
 DEFAULT_DUMP_FILE = (
     Path(__file__).resolve().parent / "05_repeated_group_train_dump.txt"
@@ -64,12 +68,11 @@ def load_train_dump(path=DEFAULT_DUMP_FILE):
     lines = path.read_text(encoding="utf-8").splitlines()
     metadata = read_metadata(lines)
 
-    d_train = read_uint32_section(lines, "d_train")
-    x_train = read_uint32_section(lines, "x_train")
-
     return {
-        "d_train": d_train,
-        "x_train": x_train,
+        "path": path,
+        "metadata": metadata,
+        "x_train": read_uint32_section(lines, "x_train"),
+        "d_train": read_uint32_section(lines, "d_train"),
         "B": int(metadata["batch_size"]),
         "I": int(metadata["input_count"]),
         "O": int(metadata["output_count"]),
@@ -79,9 +82,6 @@ def load_train_dump(path=DEFAULT_DUMP_FILE):
 
 
 def words_from_bl(bl):
-    """
-    One sign bit plus BL pulse bits, packed into uint32 words.
-    """
     return (bl + 32) // 32
 
 
@@ -94,9 +94,6 @@ def get_train(
     batch_size,
     out_trans,
 ):
-    """
-    Reconstruct one packed train from the flattened backend output.
-    """
     words = []
 
     for word_idx in range(words_per_train):
@@ -123,9 +120,6 @@ def get_train(
 
 
 def unpack_train(words, bl):
-    """
-    Return sign and BL pulse bits in chronological order.
-    """
     sign = int(words[0]) & 1
     pulses = np.empty(bl, dtype=np.uint8)
 
@@ -144,9 +138,6 @@ def unpack_train(words, bl):
 
 
 def check_left_alignment(pulses):
-    """
-    A left-aligned train has the form 111111000000.
-    """
     for idx in range(len(pulses) - 1):
         if pulses[idx] == 0 and pulses[idx + 1] == 1:
             return False, idx
@@ -158,7 +149,7 @@ def format_bits(pulses):
     bit_string = "".join(str(int(bit)) for bit in pulses)
 
     return " ".join(
-        bit_string[start:start + BITS_PER_GROUP]
+        bit_string[start : start + BITS_PER_GROUP]
         for start in range(0, len(bit_string), BITS_PER_GROUP)
     )
 
@@ -169,14 +160,18 @@ def inspect_train(
     batch_idx,
     packed_words,
     bl,
+    expect_left_aligned,
 ):
     sign, pulses = unpack_train(packed_words, bl)
     aligned, violation_idx = check_left_alignment(pulses)
 
-    status = "OK" if aligned else "FAIL"
+    if expect_left_aligned:
+        status = "OK" if aligned else "FAIL"
+    else:
+        status = "ALGN" if aligned else "RAND"
 
     print(
-        f"B{batch_idx:<3} "
+        f"B{batch_idx:<5} "
         f"{name}{feature_idx:<3} "
         f"sign={sign} "
         f"ones={int(pulses.sum()):>3}/{bl:<3} "
@@ -184,137 +179,175 @@ def inspect_train(
         f"{format_bits(pulses)}"
     )
 
-    if not aligned:
+    if expect_left_aligned and not aligned:
         print(
-            f"      first invalid 0 -> 1 transition: "
+            f"        first invalid 0 -> 1 transition: "
             f"pulse {violation_idx} -> {violation_idx + 1}"
         )
 
     return aligned
 
 
-# ============================================================
-# Load dump automatically
-# ============================================================
+def print_metadata(dump):
+    meta = dump["metadata"]
 
-dump = load_train_dump()
+    print(f"Loaded dump: {dump['path']}")
+    print(f"preset: {meta.get('preset', 'unknown')}")
+    print(f"out_trans: {int(dump['out_trans'])}")
+    print(f"BL: {dump['BL']}")
+    print(f"words/train: {words_from_bl(dump['BL'])}")
 
-d_train = dump["d_train"]
-x_train = dump["x_train"]
+    if "original_batch_size" in meta:
+        print("\nDetected CNN-style dump")
+        print(f"original_batch_size: {meta.get('original_batch_size')}")
+        print(f"image_size: {meta.get('image_size')}")
+        print(f"in_channels: {meta.get('in_channels')}")
+        print(f"out_channels: {meta.get('out_channels')}")
+        print(f"kernel_size: {meta.get('kernel_size')}")
+        print(f"stride: {meta.get('stride')}")
+        print(f"padding: {meta.get('padding')}")
+    else:
+        print("\nDetected FC-style dump")
 
-B = dump["B"]
-I = dump["I"]
-O = dump["O"]
-BL = dump["BL"]
-out_trans = dump["out_trans"]
-
-W = words_from_bl(BL)
-
-
-# ============================================================
-# Validation
-# ============================================================
-
-expected_x_length = I * B * W
-expected_d_length = O * B * W
-
-if len(x_train) != expected_x_length:
-    raise ValueError(
-        f"x_train has {len(x_train)} values, expected {expected_x_length}"
-    )
-
-if len(d_train) != expected_d_length:
-    raise ValueError(
-        f"d_train has {len(d_train)} values, expected {expected_d_length}"
-    )
+    print("\nEffective update dimensions")
+    print(f"B = {dump['B']}")
+    print(f"I = {dump['I']}")
+    print(f"O = {dump['O']}")
 
 
-# ============================================================
-# Inspect trains
-# ============================================================
+def validate_lengths(x_train, d_train, B, I, O, W):
+    expected_x_length = I * B * W
+    expected_d_length = O * B * W
 
-x_failures = []
-d_failures = []
-
-print(f"Loaded dump: {DEFAULT_DUMP_FILE}")
-print("\nExpected order: 111...000")
-print("Bits are printed from pulse 0 to pulse BL-1.\n")
-
-for batch_idx in range(B):
-    print(f"--- Batch {batch_idx} ---")
-
-    for input_idx in range(I):
-        words = get_train(
-            train=x_train,
-            feature_idx=input_idx,
-            batch_idx=batch_idx,
-            feature_count=I,
-            words_per_train=W,
-            batch_size=B,
-            out_trans=out_trans,
+    if len(x_train) != expected_x_length:
+        raise ValueError(
+            f"x_train has {len(x_train)} values, expected {expected_x_length}"
         )
 
-        aligned = inspect_train(
-            name="X",
-            feature_idx=input_idx,
-            batch_idx=batch_idx,
-            packed_words=words,
-            bl=BL,
+    if len(d_train) != expected_d_length:
+        raise ValueError(
+            f"d_train has {len(d_train)} values, expected {expected_d_length}"
         )
 
-        if not aligned:
-            x_failures.append((batch_idx, input_idx))
 
-    for output_idx in range(O):
-        words = get_train(
-            train=d_train,
-            feature_idx=output_idx,
-            batch_idx=batch_idx,
-            feature_count=O,
-            words_per_train=W,
-            batch_size=B,
-            out_trans=out_trans,
+def main():
+    dump = load_train_dump()
+
+    x_train = dump["x_train"]
+    d_train = dump["d_train"]
+
+    B = dump["B"]
+    I = dump["I"]
+    O = dump["O"]
+    BL = dump["BL"]
+    out_trans = dump["out_trans"]
+    W = words_from_bl(BL)
+
+    validate_lengths(x_train, d_train, B, I, O, W)
+    print_metadata(dump)
+
+    x_failures = []
+    d_failures = []
+
+    print("\nExpected D order: 111...000")
+    print("X is not required to be left-aligned unless EXPECT_X_LEFT_ALIGNED=True.")
+    print("Bits are printed from pulse 0 to pulse BL-1.\n")
+
+    batches_to_print = min(B, MAX_BATCHES_TO_PRINT)
+
+    for batch_idx in range(B):
+        should_print = batch_idx < batches_to_print
+
+        if should_print:
+            print(f"--- Batch {batch_idx} ---")
+
+        for input_idx in range(I):
+            words = get_train(
+                train=x_train,
+                feature_idx=input_idx,
+                batch_idx=batch_idx,
+                feature_count=I,
+                words_per_train=W,
+                batch_size=B,
+                out_trans=out_trans,
+            )
+
+            sign, pulses = unpack_train(words, BL)
+            aligned, _ = check_left_alignment(pulses)
+
+            if should_print:
+                inspect_train(
+                    name="X",
+                    feature_idx=input_idx,
+                    batch_idx=batch_idx,
+                    packed_words=words,
+                    bl=BL,
+                    expect_left_aligned=EXPECT_X_LEFT_ALIGNED,
+                )
+
+            if EXPECT_X_LEFT_ALIGNED and not aligned:
+                x_failures.append((batch_idx, input_idx))
+
+        for output_idx in range(O):
+            words = get_train(
+                train=d_train,
+                feature_idx=output_idx,
+                batch_idx=batch_idx,
+                feature_count=O,
+                words_per_train=W,
+                batch_size=B,
+                out_trans=out_trans,
+            )
+
+            sign, pulses = unpack_train(words, BL)
+            aligned, _ = check_left_alignment(pulses)
+
+            if should_print:
+                inspect_train(
+                    name="D",
+                    feature_idx=output_idx,
+                    batch_idx=batch_idx,
+                    packed_words=words,
+                    bl=BL,
+                    expect_left_aligned=EXPECT_D_LEFT_ALIGNED,
+                )
+
+            if EXPECT_D_LEFT_ALIGNED and not aligned:
+                d_failures.append((batch_idx, output_idx))
+
+        if should_print:
+            print()
+
+    if B > batches_to_print:
+        print(f"... skipped printing {B - batches_to_print} remaining batches\n")
+
+    total_x = B * I
+    total_d = B * O
+
+    print("Summary")
+
+    if EXPECT_X_LEFT_ALIGNED:
+        print(f"X: {total_x - len(x_failures)}/{total_x} left-aligned")
+    else:
+        print("X: left-alignment not required")
+
+    if EXPECT_D_LEFT_ALIGNED:
+        print(f"D: {total_d - len(d_failures)}/{total_d} left-aligned")
+    else:
+        print("D: left-alignment not required")
+
+    if d_failures:
+        print(
+            "Failed D: "
+            + ", ".join(
+                f"B{batch_idx}/D{output_idx}"
+                for batch_idx, output_idx in d_failures[:20]
+            )
         )
 
-        aligned = inspect_train(
-            name="D",
-            feature_idx=output_idx,
-            batch_idx=batch_idx,
-            packed_words=words,
-            bl=BL,
-        )
-
-        if not aligned:
-            d_failures.append((batch_idx, output_idx))
-
-    print()
+        if len(d_failures) > 20:
+            print(f"... plus {len(d_failures) - 20} more D failures")
 
 
-# ============================================================
-# Summary
-# ============================================================
-
-total_x = B * I
-total_d = B * O
-
-print("Summary")
-print(f"X: {total_x - len(x_failures)}/{total_x} left-aligned")
-print(f"D: {total_d - len(d_failures)}/{total_d} left-aligned")
-
-if x_failures:
-    print(
-        "Failed X: "
-        + ", ".join(
-            f"B{batch_idx}/X{input_idx}"
-            for batch_idx, input_idx in x_failures
-        )
-    )
-
-if d_failures:
-    print(
-        "Failed D: "
-        + ", ".join(
-            f"B{batch_idx}/D{output_idx}"
-            for batch_idx, output_idx in d_failures
-        )
-    )
+if __name__ == "__main__":
+    main()

@@ -10,10 +10,14 @@ import torch
 
 from aihwkit.nn import AnalogLinear
 from aihwkit.simulator.configs import PulseType
-from aihwkit.simulator.presets import IdealizedPreset
+from aihwkit.simulator.presets import IdealizedPreset,EcRamPreset
 from aihwkit.simulator.rpu_base import cuda
-
-
+from aihwkit.simulator.configs import (
+    PulseType,
+    UnitCellRPUConfig,
+    TransferCompound,
+)
+from aihwkit.simulator.presets.devices import EcRamPresetDevice
 # =============================================================================
 # PARAMETERS
 # =============================================================================
@@ -34,6 +38,60 @@ VALUES_PER_LINE = 16
 # Model setup
 # =============================================================================
 
+
+def create_stochastic_model_TT(desired_bl: int) -> AnalogLinear:
+    cfg = UnitCellRPUConfig(
+        device=TransferCompound(
+            unit_cell_devices=[
+                EcRamPresetDevice(dw_min=GRANULARITY),
+                EcRamPresetDevice(dw_min=GRANULARITY),
+            ],
+            units_in_mbatch=True,
+            transfer_every=2,
+            n_reads_per_transfer=1,
+            gamma=0.0,
+            scale_transfer_lr=True,
+            transfer_lr=1.0,
+            fast_lr=0.1,
+            transfer_columns=True,
+        )
+    )
+
+    # Main SGD update -> stochastic pulse trains
+    cfg.update.desired_bl = BL
+    cfg.update.pulse_type = PulseType.STOCHASTIC_COMPRESSED
+    cfg.update.fixed_bl = False
+    cfg.update.update_bl_management = True
+    cfg.update.update_management = True
+
+    # Transfer-read configuration
+    cfg.device.transfer_forward = cfg.forward
+
+    # Transfer update configuration
+    cfg.device.transfer_update = cfg.update
+
+    model = AnalogLinear(
+        IN_SIZE,
+        OUT_SIZE,
+        bias=False,
+        rpu_config=cfg,
+    )
+
+    return model.cuda() if cuda.is_compiled() else model
+
+def create_stochastic_model_ECRAM(desired_bl: int) -> AnalogLinear:
+    cfg = EcRamPreset()
+
+    cfg.update.desired_bl = BL
+    cfg.update.pulse_type = PulseType.STOCHASTIC_COMPRESSED
+    cfg.update.fixed_bl = False
+    cfg.update.update_bl_management = True
+    cfg.update.update_management = True
+
+    cfg.device.dw_min = GRANULARITY
+
+    model = AnalogLinear(IN_SIZE, OUT_SIZE, bias=False, rpu_config=cfg)
+    return model.cuda() if cuda.is_compiled() else model
 
 def create_stochastic_model(desired_bl: int) -> AnalogLinear:
     rpu_config = IdealizedPreset()
@@ -163,7 +221,7 @@ def main() -> None:
     else:
         print("Running on CPU.")
 
-    model = create_stochastic_model(BL)
+    model = create_stochastic_model_TT(BL)
     model = move_model_to_device(model)
 
     x_ref = torch.rand(BATCH_SIZE, IN_SIZE)
