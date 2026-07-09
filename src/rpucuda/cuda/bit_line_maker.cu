@@ -247,6 +247,7 @@ __global__ void kernelAdvanceLfsrSeedStates(curandState *random_states, int n_st
   }
 }
 
+
 template <typename count_t>
 __device__ __forceinline__ void getCountsSimpleLoop(
     float value,
@@ -257,7 +258,8 @@ __device__ __forceinline__ void getCountsSimpleLoop(
     uint32_t &local_state,
     int nK32,
     int sz,
-    kagg_t Kc);
+    kagg_t Kc,
+    bool sorted);
 /*STAGE 3.4 BATCH*/
 #define DISCRETIZE_VALUE_STOCH_DEFINITIONS                                                         \
   T res = resolution;                                                                              \
@@ -583,7 +585,7 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
 }
 
 
-#define GET_COUNTS_INNER_LOOP(SCALEPROB, BATCH_IDX, LSFR_DELAY)                                   \
+#define GET_COUNTS_INNER_LOOP(SCALEPROB, BATCH_IDX, LSFR_DELAY, SORTED)                                   \
   /* STAGE 3.4 */                                                                                  \
   negative = value < (T)0.0;                                                                       \
   value = (negative) ? -value : value;                                                             \
@@ -608,6 +610,7 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
   rpuBlmLfsrAdvance(lsfr, (LSFR_DELAY) + lane_offset);                                       \
                                                                                                    \
   int isize = 0;                                                                                   \
+  int sorted_ones = 0;                                                                              \
                                                                                                    \
   PRAGMA(unroll)                                                                                   \
   for (int i = 0; i < nK32; i++) {                                                                 \
@@ -623,29 +626,49 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
                                                                                                    \
     if (laneId == 0) {                                                                             \
       if (i == 0) {                                                                                \
-        ballot = (negative) ? (ballot | one) : (ballot & ~one);                                    \
+        ballot = ballot & ~one;                                                                    \
       }                                                                                            \
                                                                                                    \
       if (i == nK32m1) {                                                                           \
         ballot = ballot & lastK32mask;                                                             \
       }                                                                                            \
                                                                                                    \
-      *(c + isize) = ballot;                                                                       \
+      if (SORTED) {                                                                                \
+        sorted_ones += __popc(ballot);                                                             \
+      } else {                                                                                     \
+        if (i == 0) {                                                                              \
+          ballot = (negative) ? (ballot | one) : (ballot & ~one);                                  \
+        }                                                                                          \
+        *(c + isize) = ballot;                                                                     \
+      }                                                                                            \
       isize += sz;                                                                                 \
     }                                                                                              \
+  }                                                                                                \
+                                                                                                   \
+  if (SORTED && laneId == 0) {                                                                     \
+    int clear_offset = 0;                                                                          \
+    PRAGMA(unroll)                                                                                 \
+    for (int i = 0; i < nK32; i++) {                                                               \
+      *(c + clear_offset) = 0;                                                                     \
+      clear_offset += sz;                                                                          \
+    }                                                                                              \
+    if (negative) {                                                                                \
+      *c = one;                                                                                    \
+    }                                                                                              \
+    set_repeated_group_burst_range(c, sz, 0, sorted_ones);                                         \
   }
 
-#define GET_COUNTS_LOOP(PROB, SIZE, COUNTS, SCALEPROB, LSFR_DELAY)                                \
+#define GET_COUNTS_LOOP(PROB, SIZE, COUNTS, SCALEPROB, LSFR_DELAY, SORTED)                                \
   sz = SIZE;                                                                                       \
   /* STAGE 3.3 */                                                                                  \
   if (sourceId < sz) {                                                                             \
     value = PROB[sourceId];                                                                        \
     c = &COUNTS[sourceId];                                                                         \
                                                                                                    \
-    GET_COUNTS_INNER_LOOP(SCALEPROB, 0, LSFR_DELAY);                                               \
+    GET_COUNTS_INNER_LOOP(SCALEPROB, 0, LSFR_DELAY, SORTED);                                               \
   }
 
-#define GET_COUNTS_LOOP_BATCH(PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, LSFR_DELAY)         \
+#define GET_COUNTS_LOOP_BATCH(PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, LSFR_DELAY, SORTED)         \
   {                                                                                                \
     sz = SIZE;                                                                                     \
     int counts_offset = nK32 * sz;                                                                 \
@@ -658,7 +681,7 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
         const int batch_idx = getBatchIdx<TRANS>(sourceId, sz, m_batch);                           \
         c = &COUNTS[getCountsIdx<TRANS, OUTTRANS, uint32_t>(                                       \
             sourceId, sz, m_batch, counts_offset)];                                                \
-        GET_COUNTS_INNER_LOOP(SCALEPROB, batch_idx, LSFR_DELAY);                                   \
+        GET_COUNTS_INNER_LOOP(SCALEPROB, batch_idx, LSFR_DELAY, SORTED);                                   \
       }                                                                                            \
     }                                                                                              \
   }
@@ -724,12 +747,12 @@ __global__ void kernelUpdateGetCountsBatch_Loop2(
 
     // d input
     GET_COUNTS_LOOP_BATCH(
-        d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans, RPU_BLM_LSFR_D_DELAY);
+        d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans, RPU_BLM_LSFR_D_DELAY, true);
 
     // x input
     compute_noz_if = false;
     GET_COUNTS_LOOP_BATCH(
-        x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, RPU_BLM_LSFR_X_DELAY);
+        x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, RPU_BLM_LSFR_X_DELAY, false);
 
     // save new random states
     random_states[tid] = local_state;
@@ -1013,17 +1036,30 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
     uint32_t &local_state,
     int nK32,
     int sz,
-    kagg_t Kc) {
+    kagg_t Kc,
+    bool sorted) {
 
+  int sorted_ones = 0;
   uint32_t ballot = (negative) ? 1 : 0;
   int nK32m1_local = MIN(K >> 5, nK32m1);
   int nn = (nK32m1_local > 0) ? 31 : K;
   PRAGMA(unroll)
   for (int j = 1; j <= nn; j++) {
     float stoch_value = rpuBlmLfsrUniform(local_state);
-    ballot |= (stoch_value < value) ? (((uint32_t)1) << j) : (uint32_t)0;
+    const bool pulse = stoch_value < value;
+    if (sorted) {
+      sorted_ones += pulse ? 1 : 0;
+    } else {
+      ballot |= pulse ? (((uint32_t)1) << j) : (uint32_t)0;
+    }
   }
-  *c = ballot;
+
+  if (sorted) {
+    *c = negative ? 1 : 0;
+  } else {
+    *c = ballot;
+  }
+
   if (nK32 > 1) {
     ballot = 0;
     int offset = 0;
@@ -1038,11 +1074,20 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
         PRAGMA(unroll)
         for (int j = 0; j <= nn; j++) {
           float stoch_value = rpuBlmLfsrUniform(local_state);
-          ballot |= (stoch_value < value) ? (((uint32_t)1) << j) : (uint32_t)0;
+          const bool pulse = stoch_value < value;
+          if (sorted) {
+            sorted_ones += pulse ? 1 : 0;
+          } else {
+            ballot |= pulse ? (((uint32_t)1) << j) : (uint32_t)0;
+          }
         }
-        *(c + offset) = ballot;
+        *(c + offset) = sorted ? 0 : ballot;
       }
     }
+  }
+
+  if (sorted) {
+    set_repeated_group_burst_range(c, sz, 0, sorted_ones);
   }
 }
 
@@ -1056,7 +1101,8 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
     uint32_t &local_state,
     int nK32,
     int sz,
-    kagg_t Kc) {
+    kagg_t Kc,
+    bool sorted) {
   static_assert(sizeof(uint64_t) == sizeof(unsigned long long int), "uint64 issue");
 
   // nK32m1 NEEDS TO BE 0 (otherwise not supported)
@@ -1064,12 +1110,22 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
   int bit_pos_start = Kc & 0x1f;
 
   uint32_t ballot = 0;
+  uint32_t sorted_ones = 0;
   uint32_t neg_word = (negative) ? (0xffffffff >> (32 - K)) : 0;
 
   PRAGMA(unroll)
   for (int j = 0; j < K; j++) { // start from zero (no negative bit)
     float stoch_value = rpuBlmLfsrUniform(local_state);
-    ballot |= (stoch_value < value) ? (((uint32_t)1) << j) : (uint32_t)0;
+    const bool pulse = stoch_value < value;
+    if (sorted) {
+      sorted_ones += pulse ? 1 : 0;
+    } else {
+      ballot |= pulse ? (((uint32_t)1) << j) : (uint32_t)0;
+    }
+  }
+
+  if (sorted) {
+    ballot = (sorted_ones >= 32) ? 0xffffffffu : (((uint32_t)1u << sorted_ones) - 1u);
   }
 
   uint64_t ballot64 = (uint64_t)(ballot << bit_pos_start); // may overflow upper bits
@@ -1086,7 +1142,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
 }
 
 #define GET_COUNTS_SIMPLE_LOOP_BATCH(                                                              \
-    PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SPROPOP, TIDSTART, TIDEND, TIDN, LSFR_DELAY)  \
+    PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SPROPOP, TIDSTART, TIDEND, TIDN, LSFR_DELAY, SORTED)  \
   {                                                                                                \
     /* STAGE 3.3 BATCH */                                                                          \
     if ((tid >= TIDSTART) && (tid < TIDEND)) {                                                     \
@@ -1122,8 +1178,8 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
           /* All values in this batch replay the same LFSR sequence. */                            \
           uint32_t lsfr = rpuBlmGetLfsrSeed(lsfr_states, batch_idx);                                  \
           rpuBlmLfsrAdvance(lsfr, LSFR_DELAY);                                                         \
-          getCountsSimpleLoop<count_t>(                                                            \
-              value, negative, c, nK32m1, K, lsfr, nK32, sz, Kc);                                        \
+          getCountsSimpleLoop(                                                                 \
+              value, negative, c, nK32m1, K, lsfr, nK32, sz, Kc, SORTED);                                        \
         }                                                                                          \
       }                                                                                            \
     }                                                                                              \
@@ -1215,13 +1271,13 @@ __global__ void kernelUpdateGetCountsBatch_SimpleLoop2(
     // d input
     GET_COUNTS_SIMPLE_LOOP_BATCH(
         d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans, *, tid_nx, tid_nx + tid_nd,
-        tid_nd, RPU_BLM_LSFR_D_DELAY);
+        tid_nd, RPU_BLM_LSFR_D_DELAY, true);
 
     // x input
     compute_noz_if = false;
     GET_COUNTS_SIMPLE_LOOP_BATCH(
         x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, /, 0, tid_nx, tid_nx,
-        RPU_BLM_LSFR_X_DELAY);
+        RPU_BLM_LSFR_X_DELAY, false);
 
     // save new random states
     random_states[tid] = local_state;
@@ -1337,12 +1393,12 @@ __global__ void kernelUpdateGetCounts_Loop2(
     int sz;
 
     // d input: use the value delayed by two cycles
-    GET_COUNTS_LOOP(d_prob, d_size, d_counts, d_scaleprob, RPU_BLM_LSFR_D_DELAY);
+    GET_COUNTS_LOOP(d_prob, d_size, d_counts, d_scaleprob, RPU_BLM_LSFR_D_DELAY, true);
 
     // x input: use the current value
     compute_noz_if = false;
 
-    GET_COUNTS_LOOP(x_prob, x_size, x_counts, x_scaleprob, RPU_BLM_LSFR_X_DELAY);
+    GET_COUNTS_LOOP(x_prob, x_size, x_counts, x_scaleprob, RPU_BLM_LSFR_X_DELAY, false);
 
     // Save the advanced random state.
     random_states[tid] = local_state;

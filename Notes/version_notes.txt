@@ -166,3 +166,6 @@ if (ublm) {
 
 
 1.4.7 based on 1.4.0 but now each bit of a train is only compared to a single same LSFR value. D receive the LSFR of the same thing just 2 cycles delayed. LSFR is simulated. This simulates the method described in Jung Gyus Paper
+
+
+1.4.8 based on 1.4.7 and 1.4.2 combinded. So after applying the lsfr thingy, the train is ordered using all 1s in d to the left

@@ -19,8 +19,8 @@ from aihwkit.simulator.rpu_base import cuda
 # =============================================================================
 
 BATCH_SIZE = 128
-IN_SIZE = 256
-OUT_SIZE = 64
+IN_SIZE = 64
+OUT_SIZE = 8
 BL = 128
 GRANULARITY = 0.01
 

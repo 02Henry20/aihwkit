@@ -1,29 +1,81 @@
+from pathlib import Path
+
 import numpy as np
 
 
 BITS_PER_GROUP = 8
 
+DEFAULT_DUMP_FILE = (
+    Path(__file__).resolve().parent / "05_repeated_group_train_dump.txt"
+)
 
-def read_words(name):
-    print(f"\nPaste {name}. Empty line to finish:")
 
-    lines = []
+def read_metadata(lines):
+    metadata = {}
 
-    while True:
-        line = input("> ").strip()
+    for line in lines:
+        line = line.strip()
 
-        if not line:
+        if not line or line.startswith("#"):
+            continue
+
+        if line.startswith("["):
             break
 
-        lines.append(line)
+        if "=" in line:
+            key, value = line.split("=", 1)
+            metadata[key.strip()] = value.strip()
 
-    if not lines:
-        return np.array([], dtype=np.uint32)
+    return metadata
 
-    return np.array(
-        [int(value) for value in " ".join(lines).split()],
-        dtype=np.uint32,
-    )
+
+def read_uint32_section(lines, section_name):
+    start_tag = f"[{section_name}]"
+    end_tag = f"[/{section_name}]"
+
+    inside = False
+    values = []
+
+    for line in lines:
+        line = line.strip()
+
+        if line == start_tag:
+            inside = True
+            continue
+
+        if line == end_tag:
+            break
+
+        if inside and line:
+            values.extend(int(value) for value in line.split())
+
+    if not values:
+        raise ValueError(f"Section [{section_name}] is empty or missing.")
+
+    return np.asarray(values, dtype=np.uint32)
+
+
+def load_train_dump(path=DEFAULT_DUMP_FILE):
+    path = path.expanduser().resolve()
+
+    if not path.exists():
+        raise FileNotFoundError(f"Dump file not found: {path}")
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    metadata = read_metadata(lines)
+
+    d_train = read_uint32_section(lines, "d_train")
+    x_train = read_uint32_section(lines, "x_train")
+
+    return {
+        "d_train": d_train,
+        "x_train": x_train,
+        "B": int(metadata["batch_size"]),
+        "I": int(metadata["input_count"]),
+        "O": int(metadata["output_count"]),
+        "BL": int(metadata["bl"]),
+        "out_trans": bool(int(metadata["out_trans"])),
+    }
 
 
 def words_from_bl(bl):
@@ -72,16 +124,7 @@ def get_train(
 
 def unpack_train(words, bl):
     """
-    Return:
-
-        sign:
-            Bit 0 of the first uint32 word.
-
-        pulses:
-            The BL pulse bits in chronological order:
-            pulse 0, pulse 1, ..., pulse BL - 1.
-
-    The sign bit is not included in pulses.
+    Return sign and BL pulse bits in chronological order.
     """
     sign = int(words[0]) & 1
     pulses = np.empty(bl, dtype=np.uint8)
@@ -95,22 +138,14 @@ def unpack_train(words, bl):
             word_idx = 1 + shifted_idx // 32
             bit_idx = shifted_idx % 32
 
-        pulses[pulse_idx] = (
-            int(words[word_idx]) >> bit_idx
-        ) & 1
+        pulses[pulse_idx] = (int(words[word_idx]) >> bit_idx) & 1
 
     return sign, pulses
 
 
 def check_left_alignment(pulses):
     """
-    A left-aligned train has the form:
-
-        111111000000
-
-    It must never contain a 0 -> 1 transition.
-
-    All-zero and all-one trains are also left-aligned.
+    A left-aligned train has the form 111111000000.
     """
     for idx in range(len(pulses) - 1):
         if pulses[idx] == 0 and pulses[idx + 1] == 1:
@@ -159,17 +194,19 @@ def inspect_train(
 
 
 # ============================================================
-# Input
+# Load dump automatically
 # ============================================================
 
-d_train = read_words("d_train")
-x_train = read_words("x_train")
+dump = load_train_dump()
 
-B = int(input("\nBatch size / m_batch: "))
-I = int(input("Number of inputs / x_size: "))
-O = int(input("Number of outputs / d_size: "))
-BL = int(input("BL / current_BL: "))
-out_trans = bool(int(input("out_trans, 0 or 1: ")))
+d_train = dump["d_train"]
+x_train = dump["x_train"]
+
+B = dump["B"]
+I = dump["I"]
+O = dump["O"]
+BL = dump["BL"]
+out_trans = dump["out_trans"]
 
 W = words_from_bl(BL)
 
@@ -183,14 +220,12 @@ expected_d_length = O * B * W
 
 if len(x_train) != expected_x_length:
     raise ValueError(
-        f"x_train has {len(x_train)} values, "
-        f"expected {expected_x_length}"
+        f"x_train has {len(x_train)} values, expected {expected_x_length}"
     )
 
 if len(d_train) != expected_d_length:
     raise ValueError(
-        f"d_train has {len(d_train)} values, "
-        f"expected {expected_d_length}"
+        f"d_train has {len(d_train)} values, expected {expected_d_length}"
     )
 
 
@@ -201,9 +236,9 @@ if len(d_train) != expected_d_length:
 x_failures = []
 d_failures = []
 
+print(f"Loaded dump: {DEFAULT_DUMP_FILE}")
 print("\nExpected order: 111...000")
 print("Bits are printed from pulse 0 to pulse BL-1.\n")
-
 
 for batch_idx in range(B):
     print(f"--- Batch {batch_idx} ---")
