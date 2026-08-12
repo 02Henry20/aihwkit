@@ -20,20 +20,19 @@ from aihwkit.simulator.rpu_base import cuda
 # PARAMETERS
 # =============================================================================
 
-BATCH_SIZE = 2
+BATCH_SIZE = 128
 IMG_SIZE = 28
 IN_CHANNELS = 1
-OUT_CHANNELS = 4
-KERNEL_SIZE = 3
+OUT_CHANNELS = 10
+KERNEL_SIZE = 4
 STRIDE = 1
 PADDING = 0
-
 BL = 64
 GRANULARITY = 0.01
 
-PRESET = "ECRAM"
+# PRESET = "ECRAM"
 # PRESET = "IDEALIZED"
-# PRESET = "TT_ECRAM"
+PRESET = "TT_ECRAM"
 
 OUTPUT_FILE = Path(__file__).resolve().parent / "05_repeated_group_train_dump.txt"
 VALUES_PER_LINE = 16
@@ -57,9 +56,9 @@ def create_config_idealized(desired_bl: int):
 
     cfg.update.desired_bl = desired_bl
     cfg.update.pulse_type = PulseType.STOCHASTIC_COMPRESSED
-    cfg.update.fixed_bl = True
-    cfg.update.update_bl_management = False
-    cfg.update.update_management = False
+    cfg.update.fixed_bl = False
+    cfg.update.update_bl_management = True
+    cfg.update.update_management = True
 
     cfg.device.dw_min = GRANULARITY
     cfg.device.dw_min_std = 0
