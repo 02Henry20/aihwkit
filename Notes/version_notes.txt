@@ -170,9 +170,11 @@ if (ublm) {
 
 1.4.8 based on 1.4.7 and 1.4.2 combinded. So after applying the lsfr thingy, the train is ordered using all 1s in d to the left
 
-1.4.9 x gets all lfsr single input - d is shared lfsr 
+1.4.9 sorting, x gets all lfsr single input - d is shared lfsr 
 
-1.5.0 x gets all random PC generated input - d is shared lfsr
+1.5.0 sorting, x gets all random PC generated input - d is shared lfsr
 
-1.5.1 x gets all random PC generated input - d is shared but pc random input
+1.5.1 sorting, x gets all random PC generated input - d is shared but pc random input
 
+
+1.5.2 same as 1.5.1 but no sorting

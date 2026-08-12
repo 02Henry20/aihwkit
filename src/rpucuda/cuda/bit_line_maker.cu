@@ -193,62 +193,38 @@ __device__ __forceinline__ int getnB(const kagg_t *Kn, int m_batch, int Kplus1);
 template <bool ublm, typename count_t>
 __device__ __forceinline__ kagg_t getKc(const kagg_t *Kc_values, int batch_idx, int Kplus1);
 
-// RX-D1 pulse generation:
-// - D uses one shared LFSR sequence per batch and is sorted afterwards.
-// - X does NOT use the shared D LFSR. X pulses use the independent per-thread
-//   CURAND state already maintained by the count kernels.
-// This removes the old deterministic X/D two-cycle relationship.
-#define RPU_BLM_LSFR_X_DELAY 0 // ignored for X when USE_SHARED_LFSR=false
-#define RPU_BLM_LSFR_D_DELAY 0
+// Shared-CURAND D pulse generation:
+// - X keeps the original independent per-thread CURAND generation.
+// - D uses one CURAND state per batch. Every D feature in that batch copies
+//   the same state and therefore replays exactly the same random sequence.
+// - For pulse position t, every D feature is compared against the same r_t.
+// - D is sorted after generation exactly as in the previous implementation.
+//
+// The shared D base state is advanced between makeCounts() calls by at least
+// the current BL so consecutive updates do not reuse an overlapping shifted
+// copy of the same random sequence.
+#define RPU_BLM_SHARED_RNG_X_DELAY 0 // unused for X
+#define RPU_BLM_SHARED_RNG_D_DELAY 0
 
-// Maximal-length 32-bit Galois LFSR corresponding to
-// x^32 + x^22 + x^2 + x + 1.
-__device__ __forceinline__ uint32_t rpuBlmLfsrStep(uint32_t state) {
-  const uint32_t lsb = state & 1u;
-  state >>= 1;
-  state ^= (0u - lsb) & 0x80200003u;
-  return state;
-}
-
-__device__ __forceinline__ void rpuBlmLfsrAdvance(uint32_t &state, int cycles) {
-#pragma unroll
+__device__ __forceinline__ void
+rpuBlmCurandAdvance(curandState &state, int cycles) {
+#pragma unroll 1
   for (int i = 0; i < cycles; i++) {
-    state = rpuBlmLfsrStep(state);
+    (void)curand_uniform(&state);
   }
 }
 
-__device__ __forceinline__ float rpuBlmLfsrUniform(uint32_t &state) {
-  state = rpuBlmLfsrStep(state);
-  // Keep the 24 most significant bits, matching the effective precision of float.
-  return static_cast<float>((state >> 8) + 1u) * 0x1.0p-24f;
-}
-
-// Generate one changing seed per batch. The seed states are advanced by a tiny
-// setup kernel once per makeCounts() call and are read-only in the count kernels.
-__device__ __forceinline__ uint32_t
-rpuBlmGetLfsrSeed(const curandState *random_states, int batch_idx) {
-  curandState local_state = random_states[batch_idx];
-  uint32_t lsfr = curand(&local_state);
-
-  // Decorrelate nearby CURAND states before using the value as an LFSR state.
-  lsfr ^= lsfr >> 16;
-  lsfr *= 0x7FEB352Du;
-  lsfr ^= lsfr >> 15;
-  lsfr *= 0x846CA68Bu;
-  lsfr ^= lsfr >> 16;
-
-  return lsfr == 0u ? 1u : lsfr;
-}
-
-__global__ void kernelAdvanceLfsrSeedStates(curandState *random_states, int n_states) {
+__global__ void kernelAdvanceSharedDStates(
+    curandState *shared_d_states,
+    int n_states,
+    int cycles) {
   const int tid = blockDim.x * blockIdx.x + threadIdx.x;
   if (tid < n_states) {
-    curandState local_state = random_states[tid];
-    (void)curand(&local_state);
-    random_states[tid] = local_state;
+    curandState local_state = shared_d_states[tid];
+    rpuBlmCurandAdvance(local_state, cycles);
+    shared_d_states[tid] = local_state;
   }
 }
-
 
 template <typename count_t>
 __device__ __forceinline__ void getCountsSimpleLoop(
@@ -258,11 +234,11 @@ __device__ __forceinline__ void getCountsSimpleLoop(
     int nK32m1,
     int K,
     curandState &random_state,
-    uint32_t &lfsr_state,
+    curandState &shared_random_state,
     int nK32,
     int sz,
     kagg_t Kc,
-    bool use_shared_lfsr,
+    bool use_shared_rng,
     bool sorted);
 /*STAGE 3.4 BATCH*/
 #define DISCRETIZE_VALUE_STOCH_DEFINITIONS                                                         \
@@ -589,7 +565,7 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
 }
 
 
-#define GET_COUNTS_INNER_LOOP(SCALEPROB, BATCH_IDX, LSFR_DELAY, USE_SHARED_LFSR, SORTED)            \
+#define GET_COUNTS_INNER_LOOP(SCALEPROB, BATCH_IDX, SHARED_RNG_DELAY, USE_SHARED_RNG, SORTED)            \
   /* STAGE 3.4 */                                                                                  \
   negative = value < (T)0.0;                                                                       \
   value = (negative) ? -value : value;                                                             \
@@ -603,19 +579,19 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
   value = __shfl_sync(0xFFFFFFFF, value, 0);                                                       \
                                                                                                    \
   /*                                                                                               \
-   * RX-D1:                                                                                         \
-   *   USE_SHARED_LFSR=true  -> all D rows in one batch replay the same LFSR sequence.             \
-   *   USE_SHARED_LFSR=false -> X uses the independent CURAND state belonging to this lane.        \
+   * Shared-CURAND D:                                                                               \
+   *   USE_SHARED_RNG=true  -> every D row copies the same batch CURAND state.                     \
+   *                           Pulse t therefore uses one common random value for all D features.  \
+   *   USE_SHARED_RNG=false -> X keeps its independent per-thread CURAND stream.                   \
    *                                                                                               \
-   * Bit 0 of the first word stores the sign. Logical pulse 0 therefore starts                     \
-   * at lane 1. Lane 0 starts at logical pulse 31, the first pulse of the second packed word.      \
+   * Bit 0 of the first word stores the sign. Logical pulse 0 starts at lane 1.                    \
+   * Lane 0 starts at logical pulse 31, the first pulse of the second packed word.                 \
    */                                                                                              \
-  uint32_t lsfr = 1u;                                                                              \
-  if (USE_SHARED_LFSR) {                                                                           \
-    lsfr = (laneId == 0) ? rpuBlmGetLfsrSeed(lsfr_states, BATCH_IDX) : 0u;                         \
-    lsfr = __shfl_sync(0xFFFFFFFF, lsfr, 0);                                                       \
+  curandState shared_random_state = local_state;                                                   \
+  if (USE_SHARED_RNG) {                                                                            \
+    shared_random_state = shared_d_states[BATCH_IDX];                                              \
     const int lane_offset = (laneId == 0) ? 31 : laneId - 1;                                      \
-    rpuBlmLfsrAdvance(lsfr, (LSFR_DELAY) + lane_offset);                                           \
+    rpuBlmCurandAdvance(shared_random_state, (SHARED_RNG_DELAY) + lane_offset);                    \
   }                                                                                                \
                                                                                                    \
   int isize = 0;                                                                                   \
@@ -625,14 +601,14 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
   for (int i = 0; i < nK32; i++) {                                                                 \
     const bool pulse_lane_valid = (i != 0) || (laneId != 0);                                      \
     if (pulse_lane_valid) {                                                                         \
-      stoch_value = USE_SHARED_LFSR ? rpuBlmLfsrUniform(lsfr) : curand_uniform(&local_state);      \
+      stoch_value = USE_SHARED_RNG ? curand_uniform(&shared_random_state) : curand_uniform(&local_state);      \
     } else {                                                                                        \
       stoch_value = (T)2.0;                                                                         \
     }                                                                                               \
                                                                                                    \
-    /* Move the shared D LFSR lane to the corresponding position in the next 32-bit word. */       \
-    if (USE_SHARED_LFSR && pulse_lane_valid && i + 1 < nK32) {                                     \
-      rpuBlmLfsrAdvance(lsfr, 31);                                                                 \
+    /* Move to the corresponding shared-CURAND pulse in the next packed word. */       \
+    if (USE_SHARED_RNG && pulse_lane_valid && i + 1 < nK32) {                                     \
+      rpuBlmCurandAdvance(shared_random_state, 31);                                                                 \
     }                                                                                              \
                                                                                                    \
     ballot = __ballot_sync(0xFFFFFFFF, stoch_value < value);                                       \
@@ -671,18 +647,18 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
     set_repeated_group_burst_range(c, sz, 0, sorted_ones);                                        \
   }
 
-#define GET_COUNTS_LOOP(PROB, SIZE, COUNTS, SCALEPROB, LSFR_DELAY, USE_SHARED_LFSR, SORTED)        \
+#define GET_COUNTS_LOOP(PROB, SIZE, COUNTS, SCALEPROB, SHARED_RNG_DELAY, USE_SHARED_RNG, SORTED)        \
   sz = SIZE;                                                                                       \
   /* STAGE 3.3 */                                                                                  \
   if (sourceId < sz) {                                                                             \
     value = PROB[sourceId];                                                                        \
     c = &COUNTS[sourceId];                                                                         \
                                                                                                    \
-    GET_COUNTS_INNER_LOOP(SCALEPROB, 0, LSFR_DELAY, USE_SHARED_LFSR, SORTED);                     \
+    GET_COUNTS_INNER_LOOP(SCALEPROB, 0, SHARED_RNG_DELAY, USE_SHARED_RNG, SORTED);                     \
   }
 
 #define GET_COUNTS_LOOP_BATCH(                                                                     \
-    PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, LSFR_DELAY, USE_SHARED_LFSR, SORTED)           \
+    PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SHARED_RNG_DELAY, USE_SHARED_RNG, SORTED)           \
   {                                                                                                \
     sz = SIZE;                                                                                     \
     int counts_offset = nK32 * sz;                                                                 \
@@ -696,7 +672,7 @@ __device__ __forceinline__ void set_repeated_group_burst_range(
         c = &COUNTS[getCountsIdx<TRANS, OUTTRANS, uint32_t>(                                      \
             sourceId, sz, m_batch, counts_offset)];                                                \
         GET_COUNTS_INNER_LOOP(                                                                     \
-            SCALEPROB, batch_idx, LSFR_DELAY, USE_SHARED_LFSR, SORTED);                           \
+            SCALEPROB, batch_idx, SHARED_RNG_DELAY, USE_SHARED_RNG, SORTED);                           \
       }                                                                                            \
     }                                                                                              \
   }
@@ -722,7 +698,7 @@ __global__ void kernelUpdateGetCountsBatch_Loop2(
     int Kplus1,
     int m_batch_in,
     curandState *random_states,
-    const curandState *lsfr_states,
+    const curandState *shared_d_states,
     T resolution,
     bool sto_round) {
   // call << (size (of states)/numwarpsperblock,1),warpSize*numwarpsperblock >>
@@ -764,13 +740,13 @@ __global__ void kernelUpdateGetCountsBatch_Loop2(
     // d input
     GET_COUNTS_LOOP_BATCH(
         d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans,
-        RPU_BLM_LSFR_D_DELAY, true, true);
+        RPU_BLM_SHARED_RNG_D_DELAY, true, true);
 
     // x input
     compute_noz_if = false;
     GET_COUNTS_LOOP_BATCH(
         x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans,
-        RPU_BLM_LSFR_X_DELAY, false, false);
+        RPU_BLM_SHARED_RNG_X_DELAY, false, false);
 
     // save new random states
     random_states[tid] = local_state;
@@ -804,8 +780,8 @@ int debugKernelUpdateGetCountsBatch_Loop2(
   int n = m * 32;
   RPU_BLM_DEBUG_BATCH_INIT(n + m_batch, uint32_t);
 
-  kernelAdvanceLfsrSeedStates<<<1, 32, 0, c->getStream()>>>(
-      dev_states.getData(), m_batch);
+  kernelAdvanceSharedDStates<<<1, 32, 0, c->getStream()>>>(
+      dev_states.getData(), m_batch, MAX(K, 1));
 
   kernelUpdateGetCountsBatch_Loop2<T, false, false, false>
       <<<nblocks, nthreads, 0, c->getStream()>>>(
@@ -1052,11 +1028,11 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
     int nK32m1,
     int K,
     curandState &random_state,
-    uint32_t &lfsr_state,
+    curandState &shared_random_state,
     int nK32,
     int sz,
     kagg_t Kc,
-    bool use_shared_lfsr,
+    bool use_shared_rng,
     bool sorted) {
 
   int sorted_ones = 0;
@@ -1065,7 +1041,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
   int nn = (nK32m1_local > 0) ? 31 : K;
   PRAGMA(unroll)
   for (int j = 1; j <= nn; j++) {
-    float stoch_value = use_shared_lfsr ? rpuBlmLfsrUniform(lfsr_state) : curand_uniform(&random_state);
+    float stoch_value = use_shared_rng ? curand_uniform(&shared_random_state) : curand_uniform(&random_state);
     const bool pulse = stoch_value < value;
     if (sorted) {
       sorted_ones += pulse ? 1 : 0;
@@ -1093,7 +1069,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint32_t>(
         nn = (i == nK32m1_local) ? (K & 0x1f) : 31;
         PRAGMA(unroll)
         for (int j = 0; j <= nn; j++) {
-          float stoch_value = use_shared_lfsr ? rpuBlmLfsrUniform(lfsr_state) : curand_uniform(&random_state);
+          float stoch_value = use_shared_rng ? curand_uniform(&shared_random_state) : curand_uniform(&random_state);
           const bool pulse = stoch_value < value;
           if (sorted) {
             sorted_ones += pulse ? 1 : 0;
@@ -1119,11 +1095,11 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
     int nK32m1,
     int K,
     curandState &random_state,
-    uint32_t &lfsr_state,
+    curandState &shared_random_state,
     int nK32,
     int sz,
     kagg_t Kc,
-    bool use_shared_lfsr,
+    bool use_shared_rng,
     bool sorted) {
   static_assert(sizeof(uint64_t) == sizeof(unsigned long long int), "uint64 issue");
 
@@ -1137,7 +1113,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
 
   PRAGMA(unroll)
   for (int j = 0; j < K; j++) { // start from zero (no negative bit)
-    float stoch_value = use_shared_lfsr ? rpuBlmLfsrUniform(lfsr_state) : curand_uniform(&random_state);
+    float stoch_value = use_shared_rng ? curand_uniform(&shared_random_state) : curand_uniform(&random_state);
     const bool pulse = stoch_value < value;
     if (sorted) {
       sorted_ones += pulse ? 1 : 0;
@@ -1165,7 +1141,7 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
 
 #define GET_COUNTS_SIMPLE_LOOP_BATCH(                                                              \
     PROB, SIZE, COUNTS, SCALEPROB, TRANS, OUTTRANS, SPROPOP, TIDSTART, TIDEND, TIDN,               \
-    LSFR_DELAY, USE_SHARED_LFSR, SORTED)                                                            \
+    SHARED_RNG_DELAY, USE_SHARED_RNG, SORTED)                                                            \
   {                                                                                                \
     /* STAGE 3.3 BATCH */                                                                          \
     if ((tid >= TIDSTART) && (tid < TIDEND)) {                                                     \
@@ -1198,15 +1174,15 @@ __device__ __forceinline__ void getCountsSimpleLoop<uint64_t>(
           count_t *c = &COUNTS[getCountsIdx<TRANS, OUTTRANS, count_t>(                            \
               idx, sz, m_batch, counts_offset, K, Kc, nB)];                                       \
                                                                                                    \
-          /* RX-D1: D replays the shared batch LFSR; X consumes its independent CURAND state. */  \
-          uint32_t lsfr = 1u;                                                                      \
-          if (USE_SHARED_LFSR) {                                                                   \
-            lsfr = rpuBlmGetLfsrSeed(lsfr_states, batch_idx);                                     \
-            rpuBlmLfsrAdvance(lsfr, LSFR_DELAY);                                                   \
+          /* D copies one shared batch CURAND state; X keeps its own CURAND state. */              \
+          curandState shared_random_state = local_state;                                           \
+          if (USE_SHARED_RNG) {                                                                    \
+            shared_random_state = shared_d_states[batch_idx];                                      \
+            rpuBlmCurandAdvance(shared_random_state, SHARED_RNG_DELAY);                            \
           }                                                                                        \
           getCountsSimpleLoop(                                                                     \
-              value, negative, c, nK32m1, K, local_state, lsfr, nK32, sz, Kc,                    \
-              USE_SHARED_LFSR, SORTED);                                                            \
+              value, negative, c, nK32m1, K, local_state, shared_random_state, nK32, sz, Kc,      \
+              USE_SHARED_RNG, SORTED);                                                             \
         }                                                                                          \
       }                                                                                            \
     }                                                                                              \
@@ -1235,7 +1211,7 @@ __global__ void kernelUpdateGetCountsBatch_SimpleLoop2(
     int Kplus1_in,
     int m_batch_in,
     curandState *random_states,
-    const curandState *lsfr_states,
+    const curandState *shared_d_states,
     T resolution,
     bool sto_round,
     const T *scale_values = nullptr,
@@ -1251,7 +1227,7 @@ __global__ void kernelUpdateGetCountsBatch_SimpleLoop2(
   // -- for UM: scale values should be sqrt(amax_x/amax_d) for D
   // -- for UM: scale values has to be strictly POSITIVE (NON-zero)!!
   // -- ASSUMES: NGRID>1 !! (nblocks>1)
-  // -- worker RANDOMSTATES need one state per tid; LFSR seed states need one per batch.
+  // -- worker RANDOMSTATES need one state per tid; shared D CURAND needs one state per batch.
   // -- CAUTION: counts should be set to zero!!!
   //
   // In the case of uint64_t:
@@ -1298,13 +1274,13 @@ __global__ void kernelUpdateGetCountsBatch_SimpleLoop2(
     // d input
     GET_COUNTS_SIMPLE_LOOP_BATCH(
         d_prob, d_size, d_counts, d_scaleprob, d_trans, out_trans, *, tid_nx, tid_nx + tid_nd,
-        tid_nd, RPU_BLM_LSFR_D_DELAY, true, true);
+        tid_nd, RPU_BLM_SHARED_RNG_D_DELAY, true, true);
 
     // x input
     compute_noz_if = false;
     GET_COUNTS_SIMPLE_LOOP_BATCH(
         x_prob, x_size, x_counts, x_scaleprob, x_trans, out_trans, /, 0, tid_nx, tid_nx,
-        RPU_BLM_LSFR_X_DELAY, false, false);
+        RPU_BLM_SHARED_RNG_X_DELAY, false, false);
 
     // save new random states
     random_states[tid] = local_state;
@@ -1336,8 +1312,8 @@ int debugKernelUpdateGetCountsBatch_SimpleLoop2(
   int n = m;
   RPU_BLM_DEBUG_BATCH_INIT(n + m_batch, uint32_t);
 
-  kernelAdvanceLfsrSeedStates<<<1, 32, 0, c->getStream()>>>(
-      dev_states.getData(), m_batch);
+  kernelAdvanceSharedDStates<<<1, 32, 0, c->getStream()>>>(
+      dev_states.getData(), m_batch, MAX(K, 1));
 
   kernelUpdateGetCountsBatch_SimpleLoop2<T, false, false, false, false, false>
       <<<nblocks, nthreads, 0, c->getStream()>>>(
@@ -1376,7 +1352,7 @@ __global__ void kernelUpdateGetCounts_Loop2(
     uint32_t *d_noz,
     int Kplus1,
     curandState *random_states,
-    const curandState *lsfr_states,
+    const curandState *shared_d_states,
     T resolution,
     bool sto_round) {
 
@@ -1419,15 +1395,15 @@ __global__ void kernelUpdateGetCounts_Loop2(
     bool negative;
     int sz;
 
-    // d input: RX-D1 shared D LFSR, then sort D
+    // d input: one shared CURAND sequence across D features, then sort D
     GET_COUNTS_LOOP(
-        d_prob, d_size, d_counts, d_scaleprob, RPU_BLM_LSFR_D_DELAY, true, true);
+        d_prob, d_size, d_counts, d_scaleprob, RPU_BLM_SHARED_RNG_D_DELAY, true, true);
 
-    // x input: RX-D1 independent CURAND stream, no shared LFSR
+    // x input: original independent CURAND stream
     compute_noz_if = false;
 
     GET_COUNTS_LOOP(
-        x_prob, x_size, x_counts, x_scaleprob, RPU_BLM_LSFR_X_DELAY, false, false);
+        x_prob, x_size, x_counts, x_scaleprob, RPU_BLM_SHARED_RNG_X_DELAY, false, false);
 
     // Save the advanced random state.
     random_states[tid] = local_state;
@@ -1460,7 +1436,8 @@ int debugKernelUpdateGetCounts_Loop2(
 
   RPU_BLM_DEBUG_INIT(n + 1);
 
-  kernelAdvanceLfsrSeedStates<<<1, 32, 0, c->getStream()>>>(dev_states.getData(), 1);
+  kernelAdvanceSharedDStates<<<1, 32, 0, c->getStream()>>>(
+      dev_states.getData(), 1, MAX(K, 1));
 
   kernelUpdateGetCounts_Loop2<<<nblocks, nthreads, 0, c->getStream()>>>(
       dev_indata.getData(), 0, scaleprob, dev_counts.getData(), dev_indata.getData(), size,
@@ -2352,13 +2329,14 @@ void BitLineMaker<T>::makeCounts(
 
         const int n_random_states = nthreads_ * nblocks;
         curandState *random_states = context_->getRandomStates(n_random_states + 1);
-        curandState *lsfr_states = random_states;
+        curandState *shared_d_states = random_states;
         random_states += 1;
-        kernelAdvanceLfsrSeedStates<<<1, 32, 0, s>>>(lsfr_states, 1);
+        kernelAdvanceSharedDStates<<<1, 32, 0, s>>>(
+            shared_d_states, 1, MAX(current_BL_, 1));
 
         kernelUpdateGetCounts_Loop2<<<nblocks, nthreads_, 0, s>>>(
             x_in, x_size_, B, dev_x_counts_->getData(), d_in, d_size_, A, dev_d_counts_->getData(),
-            dev_d_noz, Kplus1, random_states, lsfr_states, res, sr);
+            dev_d_noz, Kplus1, random_states, shared_d_states, res, sr);
 
       } else {
         // fast path for smaller K values (needs to be K<=32! and (K + 1) % 2 == 0)
@@ -2380,17 +2358,17 @@ void BitLineMaker<T>::makeCounts(
         int nblocks = context_->getNBlocks(m, nthreads_);
         nblocks = MAX(MIN(max_block_count_, nblocks), 2);
 
-        const int n_lsfr_states = MAX(m_batch, 1);
+        const int n_shared_d_states = MAX(m_batch, 1);
         const int n_random_states = nthreads_ * nblocks;
         curandState *random_states =
-            context_->getRandomStates(n_lsfr_states + n_random_states);
-        curandState *lsfr_states = random_states;
-        random_states += n_lsfr_states;
+            context_->getRandomStates(n_shared_d_states + n_random_states);
+        curandState *shared_d_states = random_states;
+        random_states += n_shared_d_states;
 
         const int seed_threads = MIN(nthreads_, 256);
-        const int seed_blocks = (n_lsfr_states + seed_threads - 1) / seed_threads;
-        kernelAdvanceLfsrSeedStates<<<seed_blocks, seed_threads, 0, s>>>(
-            lsfr_states, n_lsfr_states);
+        const int seed_blocks = (n_shared_d_states + seed_threads - 1) / seed_threads;
+        kernelAdvanceSharedDStates<<<seed_blocks, seed_threads, 0, s>>>(
+            shared_d_states, n_shared_d_states, MAX(current_BL_, 1));
 
         if (use_bo64 == 1) {
 
@@ -2409,7 +2387,7 @@ void BitLineMaker<T>::makeCounts(
               kernelUpdateGetCountsBatch_SimpleLoop2,
               (x_in, x_size_, B, dev_x_counts_bo64_->getData(), d_in, d_size_, A,
                dev_d_counts_bo64_->getData(), dev_d_noz, current_BL_ + 1, m_batch,
-               random_states, lsfr_states, res, sr, scale_values, K_values,
+               random_states, shared_d_states, res, sr, scale_values, K_values,
                lr / weight_granularity, Kc_values, Kn));
         } else {
 
@@ -2422,7 +2400,7 @@ void BitLineMaker<T>::makeCounts(
               kernelUpdateGetCountsBatch_SimpleLoop2,
               (x_in, x_size_, B, dev_x_counts_->getData(), d_in, d_size_, A,
                dev_d_counts_->getData(), dev_d_noz, current_BL_ + 1, m_batch,
-               random_states, lsfr_states, res, sr, scale_values, K_values,
+               random_states, shared_d_states, res, sr, scale_values, K_values,
                lr / weight_granularity));
         }
       } else {
@@ -2430,21 +2408,21 @@ void BitLineMaker<T>::makeCounts(
         int nblocks = context_->getNBlocks(m, nthreads_);
         nblocks = MIN(max_block_count_, nblocks);
 
-        const int n_lsfr_states = MAX(m_batch, 1);
+        const int n_shared_d_states = MAX(m_batch, 1);
         const int n_random_states = nthreads_ * nblocks;
         curandState *random_states =
-            context_->getRandomStates(n_lsfr_states + n_random_states);
-        curandState *lsfr_states = random_states;
-        random_states += n_lsfr_states;
+            context_->getRandomStates(n_shared_d_states + n_random_states);
+        curandState *shared_d_states = random_states;
+        random_states += n_shared_d_states;
         const int seed_threads = MIN(nthreads_, 256);
-        const int seed_blocks = (n_lsfr_states + seed_threads - 1) / seed_threads;
-        kernelAdvanceLfsrSeedStates<<<seed_blocks, seed_threads, 0, s>>>(
-            lsfr_states, n_lsfr_states);
+        const int seed_blocks = (n_shared_d_states + seed_threads - 1) / seed_threads;
+        kernelAdvanceSharedDStates<<<seed_blocks, seed_threads, 0, s>>>(
+            shared_d_states, n_shared_d_states, MAX(current_BL_, 1));
 
         RPU_BLM_SWITCH_TRANS_TEMPLATE(
             x_trans, d_trans, out_trans, kernelUpdateGetCountsBatch_Loop2,
             (x_in, x_size_, B, dev_x_counts_->getData(), d_in, d_size_, A, dev_d_counts_->getData(),
-             dev_d_noz, current_BL_ + 1, m_batch, random_states, lsfr_states,
+             dev_d_noz, current_BL_ + 1, m_batch, random_states, shared_d_states,
              res, sr), );
       }
     }
@@ -2679,8 +2657,8 @@ RPU_BLM_ITER_TEMPLATE(half_t, const half_t *, EyeInputIterator<half_t>);
 #undef RPU_BLM_BL_TO_SELECT_SIMPLE_LOOP
 #undef LASTK32MASK
 #undef RPU_BLM_DEFINE_NK32
-#undef RPU_BLM_LSFR_X_DELAY
-#undef RPU_BLM_LSFR_D_DELAY
+#undef RPU_BLM_SHARED_RNG_X_DELAY
+#undef RPU_BLM_SHARED_RNG_D_DELAY
 #undef RPU_BLM_DEFINE_NK32_BATCH
 #undef COMMA
 #undef RPU_BLM_DEBUG_INIT
